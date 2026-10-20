@@ -133,6 +133,31 @@ it("publishes no registration environment when REA_JADX_MCP_JAR is unset", async
   });
 });
 
+it("reports a relative REA_JADX_MCP_JAR as invalid configuration, not as unset", async () => {
+  const inspection = await inspectJadxProvider({
+    REA_JADX_MCP_JAR: "tools/jadx-headless-mcp.jar",
+  });
+
+  expect(inspection).toMatchObject({
+    id: "jadx",
+    configured: true,
+    available: false,
+    registrationEnvironment: {},
+    checks: [
+      {
+        name: "configuration",
+        ok: false,
+        code: "open_options_invalid",
+        detail: expect.stringContaining(
+          "REA_JADX_MCP_JAR must be an absolute path; received tools/jadx-headless-mcp.jar.",
+        ),
+        remediation: expect.stringContaining("REA_JADX_MCP_JAR"),
+        classification: "config_drift",
+      },
+    ],
+  });
+});
+
 it("publishes no registration environment when the configured JAR fails validation", async () => {
   const root = await createTestTempDirectory("rea-jadx-doctor-invalid-");
   const jar = join(root, "engine.jar");
