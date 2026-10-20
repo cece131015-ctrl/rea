@@ -254,9 +254,6 @@ process.stdin.on("data", (chunk) => {
     expect(firstValid.ok).toBe(true);
     if (firstValid.ok) {
       expect(firstValid.value.result).not.toHaveProperty("output_invalid_utf8");
-      expect(firstValid.value.evidence.raw_result).not.toHaveProperty(
-        "output_invalid_utf8",
-      );
       expect(firstValid.value.evidence.normalized_result).not.toHaveProperty(
         "output_invalid_utf8",
       );
@@ -269,9 +266,6 @@ process.stdin.on("data", (chunk) => {
     expect(invalid.ok).toBe(true);
     if (invalid.ok) {
       expect(invalid.value.result.output_invalid_utf8).toBe(true);
-      expect(invalid.value.evidence.raw_result).toMatchObject({
-        output_invalid_utf8: true,
-      });
       expect(invalid.value.evidence.normalized_result).toMatchObject({
         output_invalid_utf8: true,
       });
@@ -284,9 +278,6 @@ process.stdin.on("data", (chunk) => {
     expect(laterValid.ok).toBe(true);
     if (laterValid.ok) {
       expect(laterValid.value.result).not.toHaveProperty("output_invalid_utf8");
-      expect(laterValid.value.evidence.raw_result).not.toHaveProperty(
-        "output_invalid_utf8",
-      );
       expect(laterValid.value.evidence.normalized_result).not.toHaveProperty(
         "output_invalid_utf8",
       );

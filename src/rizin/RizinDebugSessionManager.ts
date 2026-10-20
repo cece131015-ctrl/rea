@@ -86,7 +86,6 @@ const createRizinCommandEvidence = ({
       launch_provenance: { ...launchProvenance },
     },
     result: { ...result },
-    rawResult: { ...result },
     subjectUnavailableReason:
       "The current debugger target identity is not established by the Rizin session identifier.",
     limitations: [

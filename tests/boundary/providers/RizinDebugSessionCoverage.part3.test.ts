@@ -24,7 +24,10 @@ it.skipIf(process.platform === "win32")(
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.result.completion_status).toBe("unknown");
-      expect(result.value.evidence.raw_result).toEqual(result.value.result);
+      expect(result.value.evidence.normalized_result).toEqual(
+        result.value.result,
+      );
+      expect(result.value.evidence.raw_result).toBeNull();
       expect(result.value.evidence.parameters.launch_provenance).toEqual({
         caller_selected_path: "/tmp/injected",
         resolved_path: "/tmp/injected",
@@ -255,7 +258,10 @@ it.skipIf(process.platform === "win32")(
         completion_status: "unknown",
         backend: null,
       });
-      expect(result.value.evidence.raw_result).toEqual(result.value.result);
+      expect(result.value.evidence.normalized_result).toEqual(
+        result.value.result,
+      );
+      expect(result.value.evidence.raw_result).toBeNull();
       expect(result.value.evidence.limitations).toEqual([
         "The current debugger target identity is not established by the Rizin session identifier.",
         "Rizin exited before the command-completion marker; retained frame output is partial and command completion is unknown.",

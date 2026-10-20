@@ -704,7 +704,7 @@ it("retains partial GDB command Evidence while an inherited writer remains", asy
           process_exit_observed: true,
           completion_status: "unknown",
         },
-        raw_result: { process_exit_observed: true },
+        raw_result: null,
       },
     },
   });
@@ -1641,7 +1641,7 @@ it("preserves SIGTERM startup exit status in the capability failure and Evidence
     expect(started.error._tag).toBe("AnalysisCapabilityUnavailableError");
     expect(started.error.message).toContain("exit code null, signal SIGTERM");
     expect(started.error.partialObservation).toMatchObject({
-      raw_result: {
+      normalized_result: {
         process_exit_code: null,
         process_exit_signal: "SIGTERM",
         process_exit_observed: true,
@@ -2917,7 +2917,7 @@ it("preserves the protocol failure when an incomplete stop adds uncertainty", as
     });
     expect(failed.error.partialObservation).toMatchObject({
       predicate_type: "rea.debugger.console-observation",
-      raw_result: {
+      normalized_result: {
         records: ['~"protocol output before failure"'],
         completion_status: "unknown",
       },
@@ -2969,7 +2969,7 @@ it("drains buffered startup stdout before capturing early-exit Evidence", async 
   expect(children).toHaveLength(2);
   if (!started.ok)
     expect(started.error.partialObservation).toMatchObject({
-      raw_result: {
+      normalized_result: {
         process_exit_code: 7,
         records: ['~"late startup record"'],
         completion_status: "unknown",

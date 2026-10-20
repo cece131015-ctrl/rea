@@ -33,7 +33,7 @@ it("preserves every field of partial Rizin timeout Evidence", () => {
       resolved_path: "/workspace/program",
     },
   });
-  expect(evidence.raw_result).toEqual(result);
+  expect(evidence.raw_result).toBeNull();
   expect(evidence.normalized_result).toEqual(result);
   expect(evidence.limitations).toEqual([
     "The current debugger target identity is not established by the Rizin session identifier.",

@@ -944,10 +944,6 @@ export class GdbSessionManager {
                 ...startupEvidencePayload,
                 records: [...startupEvidencePayload.records],
               },
-              rawResult: {
-                ...startupEvidencePayload,
-                records: [...startupEvidencePayload.records],
-              },
               subjectUnavailableReason:
                 "No usable debugger session became ready during GDB startup.",
               limitations: [
@@ -1112,19 +1108,6 @@ export class GdbSessionManager {
                     : {}),
                   completion_status: result.completion_status,
                 },
-                rawResult: {
-                  command,
-                  mi: result.mi,
-                  records: [...result.records],
-                  console: result.console,
-                  target: result.target,
-                  log: result.log,
-                  output_truncated: result.output_truncated,
-                  ...(result.output_invalid_utf8
-                    ? { output_invalid_utf8: true as const }
-                    : {}),
-                  completion_status: result.completion_status,
-                },
                 subjectUnavailableReason:
                   "The active GDB inferior identity is not established by the debugger session identifier.",
                 limitations: [
@@ -1163,7 +1146,6 @@ export class GdbSessionManager {
                   operation: "gdb_console",
                   parameters: { session_id: sessionId, command },
                   result: { ...result, records: [...result.records] },
-                  rawResult: { ...result, records: [...result.records] },
                   subjectUnavailableReason:
                     "The active GDB inferior identity is not established by the debugger session identifier.",
                   limitations: [
@@ -1649,7 +1631,6 @@ export class GdbSessionManager {
               command: partial.command,
             },
             result: { ...partial, records: [...partial.records] },
-            rawResult: { ...partial, records: [...partial.records] },
             subjectUnavailableReason:
               "The active GDB inferior identity is not established by the debugger session identifier.",
             limitations: [
@@ -1908,7 +1889,6 @@ export class GdbSessionManager {
             command: pending.evidenceCommand,
           },
           result: { ...partial, records: [...partial.records] },
-          rawResult: { ...partial, records: [...partial.records] },
           subjectUnavailableReason:
             "The active GDB inferior identity is not established by the debugger session identifier.",
           limitations: [
@@ -2024,7 +2004,6 @@ export class GdbSessionManager {
             command: pending.evidenceCommand,
           },
           result: { ...partial, records: [...partial.records] },
-          rawResult: { ...partial, records: [...partial.records] },
           subjectUnavailableReason:
             "The active GDB inferior identity is not established by the debugger session identifier.",
           limitations: [

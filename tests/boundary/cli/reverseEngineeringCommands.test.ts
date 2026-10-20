@@ -43,7 +43,6 @@ const observation = (completionStatus: "complete" | "unknown") =>
       operation: "inspect_with_objdump",
       parameters: { operation: "file_headers" },
       result: { completion_status: completionStatus },
-      rawResult: { completion_status: completionStatus },
     },
   );
 
@@ -349,7 +348,6 @@ it("parses the Rizin inferior TTY as an option and passes it to the manager", as
         inferior_tty: "/dev/pts/7",
       },
       result: { output: "registers" },
-      rawResult: { output: "registers" },
     },
   );
   const start = vi

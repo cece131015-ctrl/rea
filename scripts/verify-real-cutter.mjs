@@ -90,11 +90,11 @@ try {
     "--json",
   );
   assert.equal(inspection.predicate_type, "rea.cutter.command-observation");
-  assert.ok(
-    Object.hasOwn(inspection, "raw_result"),
+  assert.equal(
+    typeof inspection.normalized_result.output?.bin?.arch,
+    "string",
     "Cutter ij result was not retained as Evidence.",
   );
-  assert.equal(typeof inspection.raw_result.bin?.arch, "string");
 
   const mcpServer = createServer(
     { kind: "fixed", analysis: unavailableAnalysis },
@@ -167,7 +167,7 @@ try {
     "CC. @ entry0",
   );
   assert.ok(
-    !String(removed.raw_result).includes(annotation),
+    !String(removed.normalized_result.output).includes(annotation),
     "The in-memory annotation was not removed before project reopening.",
   );
   await runCli(
@@ -184,7 +184,7 @@ try {
   );
   assert.equal(recovered.predicate_type, "rea.cutter.command-observation");
   assert.ok(
-    String(recovered.raw_result).includes(annotation),
+    String(recovered.normalized_result.output).includes(annotation),
     "The saved project did not preserve the analysis comment after reopening.",
   );
   const finalArtifactDigest = createHash("sha256")
