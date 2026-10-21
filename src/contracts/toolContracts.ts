@@ -23,6 +23,10 @@ import { ELECTRON_TOOL_CONTRACTS } from "./javascript/electronToolContracts.js";
 import { JAVASCRIPT_RUNTIME_OBSERVATION_TOOL_CONTRACTS } from "./javascript/javascriptRuntimeObservationToolContracts.js";
 import { APPLICATION_TOOL_CONTRACTS } from "./applicationToolContracts.js";
 import { WEB_SCRIPT_TOOL_CONTRACTS } from "./webScriptToolContracts.js";
+import {
+  LOCAL_APPLICATION_TOOL_CONTRACTS,
+  WEB_MIRROR_TOOL_CONTRACTS,
+} from "./cloneToolContracts.js";
 import { WEB_RUNTIME_TOOL_CONTRACTS } from "./webRuntimeToolContracts.js";
 import { WEB_NETWORK_CAPTURE_TOOL_CONTRACTS } from "./webNetworkCaptureToolContracts.js";
 import { JAVASCRIPT_RECOVERY_TOOL_CONTRACTS } from "./javascript/javascriptRecoveryToolContracts.js";
@@ -64,6 +68,8 @@ export const TOOL_CONTRACTS = [
   ...JAVASCRIPT_RUNTIME_OBSERVATION_TOOL_CONTRACTS,
   ...APPLICATION_TOOL_CONTRACTS,
   ...WEB_SCRIPT_TOOL_CONTRACTS,
+  ...WEB_MIRROR_TOOL_CONTRACTS,
+  ...LOCAL_APPLICATION_TOOL_CONTRACTS,
   ...WEB_RUNTIME_TOOL_CONTRACTS,
   ...WEB_NETWORK_CAPTURE_TOOL_CONTRACTS,
   ...JAVASCRIPT_RECOVERY_TOOL_CONTRACTS,

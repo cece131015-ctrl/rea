@@ -66,6 +66,7 @@ import { registerNativeTools } from "./registerNativeTools.js";
 import { registerBrowserScenarioTool } from "./registerBrowserScenarioTool.js";
 import { registerBrowserTools } from "./registerBrowserTools.js";
 import { registerWebScriptTool } from "./registerWebScriptTool.js";
+import { registerCloneTools } from "./registerCloneTools.js";
 import { registerWebModuleTool } from "./registerWebModuleTool.js";
 import type { WebModuleTraceService } from "../application/WebModuleTraceService.js";
 import { createWebModuleTraceService } from "../composition/webModules.js";
@@ -890,6 +891,7 @@ const registerBinaryAnalysisTools = ({
 };
 
 const registerObservationTools = ({
+  environment,
   electronFuses,
   evidenceById,
   server,
@@ -911,6 +913,14 @@ const registerObservationTools = ({
     ...common,
     provider: options.browserScenarioCapture,
     loadFailure: options.optionalProviderLoadFailures?.browserScenarioCapture,
+  });
+  registerCloneTools(server, {
+    ...common,
+    artifactResources,
+    environment,
+    browser: options.browserScenarioCapture,
+    browserLoadFailure:
+      options.optionalProviderLoadFailures?.browserScenarioCapture,
   });
   registerElectronTools(server, {
     ...common,

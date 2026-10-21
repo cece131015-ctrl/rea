@@ -97,6 +97,9 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.browserScenarioContracts.BROWSER_SCENARIO_TOOL_CONTRACTS,
         ...sources.webNetworkCaptureContracts
           .WEB_NETWORK_CAPTURE_TOOL_CONTRACTS,
+        ...sources.cloneContracts.WEB_MIRROR_TOOL_CONTRACTS.filter(
+          ({ kind }) => kind === "browser-provider",
+        ),
       ],
     },
     {
@@ -118,6 +121,10 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.applicationContracts.APPLICATION_TOOL_CONTRACTS,
         ...sources.analysisViewContracts.ANALYSIS_VIEW_TOOL_CONTRACTS,
         ...sources.webScriptContracts.WEB_SCRIPT_TOOL_CONTRACTS,
+        ...sources.cloneContracts.WEB_MIRROR_TOOL_CONTRACTS.filter(
+          ({ kind }) => kind === "application",
+        ),
+        ...sources.cloneContracts.LOCAL_APPLICATION_TOOL_CONTRACTS,
         ...sources.javascriptRecoveryContracts
           .JAVASCRIPT_RECOVERY_TOOL_CONTRACTS,
       ],
@@ -407,6 +414,14 @@ export const providerCatalog = (sources) => {
     {
       identity: sources.artifactProviders.WEB_SCRIPT_EXPORT_PROVIDER,
       contracts: sources.webScriptContracts.WEB_SCRIPT_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.artifactProviders.WEB_MIRROR_EXPORT_PROVIDER,
+      contracts: sources.cloneContracts.WEB_MIRROR_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.artifactProviders.LOCAL_APPLICATION_PROVIDER,
+      contracts: sources.cloneContracts.LOCAL_APPLICATION_TOOL_CONTRACTS,
     },
     {
       identity: sources.javascriptRecoveryProvider.WAKARU_PROVIDER_IDENTITY,

@@ -137,6 +137,7 @@ describe("tool effects", () => {
       "capture_electron_scenario",
       "capture_native_ui_scenario",
       "capture_process_scenario",
+      "clone_website",
       "close_gdb_session",
       "close_rizin_debug_session",
       "cutter_command",

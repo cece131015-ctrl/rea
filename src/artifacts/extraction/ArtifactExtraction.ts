@@ -43,7 +43,8 @@ import type { ArtifactIntegrityPolicyName } from "../../domain/artifactIntegrity
 /** Local extraction input with the output root chosen by the adapter. */
 export interface ArtifactExtractionInput {
   readonly inputPath: string;
-  readonly inputFormat: BinaryTarget["format"];
+  /** A target format, or "directory" for a caller-selected directory tree. */
+  readonly inputFormat: BinaryTarget["format"] | "directory";
   readonly outputRoot: string;
   readonly environment: Readonly<NodeJS.ProcessEnv>;
   readonly integrityPolicy: ArtifactIntegrityPolicyName;
@@ -55,28 +56,43 @@ export const extractArtifact = async (
   input: ArtifactExtractionInput,
   signal?: AbortSignal,
 ): Promise<ArtifactExtractionResult> =>
-  input.resourceScope.run(() => extractArtifactInScope(input, signal));
+  (await extractArtifactWithInventory(input, signal)).result;
+
+/** Extract, also returning the scanned inventory the extraction verified. */
+export const extractArtifactWithInventory = async (
+  input: ArtifactExtractionInput,
+  signal?: AbortSignal,
+): Promise<{
+  readonly result: ArtifactExtractionResult;
+  readonly inventory: ArtifactInventorySnapshot;
+}> => input.resourceScope.run(() => extractArtifactInScope(input, signal));
 
 const extractArtifactInScope = async (
   input: ArtifactExtractionInput,
   signal?: AbortSignal,
-): Promise<ArtifactExtractionResult> => {
+): Promise<{
+  readonly result: ArtifactExtractionResult;
+  readonly inventory: ArtifactInventorySnapshot;
+}> => {
   // Cancellation wins over every later refusal, including unsupported formats.
   abortIfNeeded(signal);
   const sourcePath = await realpath(input.inputPath);
   await requireExtractableFormat(sourcePath, input);
-  const snapshot = await scanArtifactInventoryInScope(sourcePath, {
+  const inventory = await scanArtifactInventoryInScope(sourcePath, {
     resourceScope: input.resourceScope,
     signal,
     environment: input.environment,
     integrity: { mode: input.integrityPolicy },
   });
-  return materializeArtifactInventoryInScope(
-    input,
-    sourcePath,
-    snapshot,
-    signal,
-  );
+  return {
+    result: await materializeArtifactInventoryInScope(
+      input,
+      sourcePath,
+      inventory,
+      signal,
+    ),
+    inventory,
+  };
 };
 
 /** Materialize a scanned inventory, verifying every current occurrence against it. */

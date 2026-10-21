@@ -232,6 +232,25 @@ const pathRequests: readonly [string, Record<string, unknown>][] = [
     { capture_path: "/tmp/capture.json", output_directory: nul },
   ],
   [
+    "export_web_mirror",
+    { capture_path: nul, output_directory: "/tmp/site-mirror" },
+  ],
+  [
+    "export_web_mirror",
+    { capture_path: "/tmp/capture.json", output_directory: nul },
+  ],
+  ["clone_website", { url: "https://example.test/", output_directory: nul }],
+  [
+    "clone_website",
+    {
+      url: "https://example.test/",
+      output_directory: "/tmp/site-clone",
+      browser_executable_path: nul,
+    },
+  ],
+  ["find_local_applications", { query: "editor", search_roots: [nul] }],
+  ["clone_local_application", { application: "editor", output_directory: nul }],
+  [
     "trace_web_source_location",
     {
       manifest_path: nul,

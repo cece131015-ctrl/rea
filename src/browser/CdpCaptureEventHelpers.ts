@@ -1,3 +1,4 @@
+import { isJsonMediaType } from "../domain/mediaType.js";
 import {
   isHttpUrl,
   numberValue,
@@ -73,13 +74,6 @@ export const isJsonContentType = (
     )
       return true;
   return false;
-};
-
-export const isJsonMediaType = (value: string | null | undefined): boolean => {
-  const mediaType = value?.split(";", 1)[0]?.trim().toLowerCase();
-  return (
-    mediaType === "application/json" || mediaType?.endsWith("+json") === true
-  );
 };
 
 export const consolePrimitive = (

@@ -7,23 +7,44 @@ import { browserScenarioEventSchema } from "../../src/domain/browserScenarioCapt
 import { createEvidence } from "../../src/domain/evidence.js";
 import { jsonValueSchema } from "../../src/domain/jsonValue.js";
 
+/** One authored response in a scenario capture fixture. */
+export interface FixtureWebResource {
+  readonly url: string;
+  /** Retained bytes; omitted bodies are recorded as unreadable. */
+  readonly bytes?: Buffer;
+  readonly resourceType?: string;
+  readonly mediaType?: string | null;
+  readonly status?: number;
+  /** The transaction this request followed after a redirect. */
+  readonly redirectedFrom?: string;
+}
+
 /** Source-owned script capture with independently authored bytes. */
 export const scriptScenarioFixture = (
-  scripts = [
+  scripts: readonly FixtureWebResource[] = [
     {
       url: "https://fixture.test/app/main.js",
       bytes: Buffer.from("export const marker = 'fixture-source';\n"),
     },
   ],
+) => webResourceScenarioFixture(scripts);
+
+/** Scenario capture with authored responses of any resource type. */
+export const webResourceScenarioFixture = (
+  resources: readonly FixtureWebResource[],
+  entryUrl = "https://fixture.test/",
 ) => {
-  const items = scripts.flatMap(({ url, bytes }, index) => {
+  const items = resources.flatMap((resource, index) => {
+    const { url, bytes } = resource;
     const request = {
       transaction_id: `request-${index + 1}`,
-      redirected_from_transaction_id: null,
-      redirected_from_transaction_state: "root",
+      redirected_from_transaction_id: resource.redirectedFrom ?? null,
+      ...(resource.redirectedFrom === undefined
+        ? { redirected_from_transaction_state: "root" }
+        : {}),
       method: "GET",
       url: sanitizeBrowserUrl(url),
-      resource_type: "script",
+      resource_type: resource.resourceType ?? "script",
       header_names: [],
       failure: null,
       step_index: 0,
@@ -40,7 +61,7 @@ export const scriptScenarioFixture = (
         ...request,
         sequence: start + 1,
         kind: "response",
-        status: 200,
+        status: resource.status ?? 200,
       }),
       browserScenarioEventSchema.parse({
         sequence: start + 2,
@@ -50,16 +71,26 @@ export const scriptScenarioFixture = (
         phase: "response",
         source_event_sequence: start + 1,
         headers: { state: "not_requested" },
-        body: {
-          state: "captured",
-          representation: "browser-decoded-response-bytes",
-          encoding: "base64",
-          content: bytes.toString("base64"),
-          bytes: bytes.length,
-          sha256: createHash("sha256").update(bytes).digest("hex"),
-          media_type: "text/javascript",
-          redacted: false,
-        },
+        body:
+          bytes === undefined
+            ? {
+                state: "unavailable",
+                reason: "body-read-failed",
+                message: "Response body is unavailable for redirect responses",
+              }
+            : {
+                state: "captured",
+                representation: "browser-decoded-response-bytes",
+                encoding: "base64",
+                content: bytes.toString("base64"),
+                bytes: bytes.length,
+                sha256: createHash("sha256").update(bytes).digest("hex"),
+                media_type:
+                  resource.mediaType === undefined
+                    ? "text/javascript"
+                    : resource.mediaType,
+                redacted: false,
+              },
       }),
     ];
   });
@@ -75,8 +106,8 @@ export const scriptScenarioFixture = (
     action: index === 0 ? "goto_start" : "wait_for_timeout",
     status: "completed",
     elapsed_ms: 1,
-    before_url: sanitizeBrowserUrl("https://fixture.test/"),
-    after_url: sanitizeBrowserUrl("https://fixture.test/"),
+    before_url: sanitizeBrowserUrl(entryUrl),
+    after_url: sanitizeBrowserUrl(entryUrl),
     error: null,
     event_sequence_start: 1,
     event_sequence_end: items.length,

@@ -24,9 +24,9 @@ import {
   firstCallFrame,
   initiatorLocation,
   integerOrNull,
-  isJsonMediaType,
   isMainFrameNavigation,
 } from "./CdpCaptureEventHelpers.js";
+import { isJsonMediaType } from "../domain/mediaType.js";
 import type { CdpCaptureEventsState } from "./CdpCaptureEventState.js";
 import {
   CDP_CAPTURE_SCRIPT_METADATA_LIMITS,

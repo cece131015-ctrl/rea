@@ -410,7 +410,7 @@ const isArtifactOperation = (
 
 /** Translate one artifact boundary failure while retaining cleanup evidence. */
 export const translateArtifactFailure = (
-  operation: ArtifactAnalysisOperation,
+  operation: ArtifactOperationError["operation"],
   cause: unknown,
 ): AnalysisError => {
   if (cause instanceof ArtifactReaderFailure) {

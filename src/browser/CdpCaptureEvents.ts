@@ -6,7 +6,7 @@ import * as bodyShapes from "./CdpCaptureEventBodyShapes.js";
 import type { CdpCaptureEventsState } from "./CdpCaptureEventState.js";
 import type { CapturedScript, NetworkState } from "./CdpCaptureEventTypes.js";
 import * as handlers from "./CdpCaptureEventHandlers.js";
-import { isJsonMediaType } from "./CdpCaptureEventHelpers.js";
+import { isJsonMediaType } from "../domain/mediaType.js";
 import { cdpStringValue, recordValue } from "./CdpCaptureValues.js";
 
 export interface ResponseBodyCandidate {

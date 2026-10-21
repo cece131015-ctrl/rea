@@ -2,7 +2,7 @@
 name: reverse-engineer-anything
 description: Reverse engineer native, managed, Electron/JavaScript, packaged, firmware, and browser targets with REA. Use shipped-artifact or requested runtime evidence to explain features, compare versions, decompile code, or guide a reconstruction. Skip REA for ordinary source-repository architecture analysis.
 metadata:
-  version: "42"
+  version: "43"
 ---
 
 # REA
@@ -104,6 +104,16 @@ explicit path or endpoint and do not need it.
   consult the NativeAOT workflow in `references/native-and-artifacts.md` for
   optional metadata recovery and its supported host/layout boundary.
 - User-owned browser page already open: `list_browser_targets`.
+- Clone a website from its URL into a local browsable copy: `clone_website`
+  with a caller-selected browser executable; mirror a saved scenario capture
+  with `export_web_mirror`. Read `index.html` and `manifest.json` from the
+  output instead of requesting the capture inline. See
+  [website clones](https://github.com/morluto/rea/blob/main/docs/website-clone.md).
+- Application installed on this computer, named by the user:
+  `find_local_applications`, then `clone_local_application` with the unique
+  match or its path; analyze copied `app.asar` inputs with
+  `analyze_javascript_application`. REA never downloads apps. See
+  [local applications](https://github.com/morluto/rea/blob/main/docs/local-applications.md).
 - Browser action the agent must perform (click, type, navigate):
   `capture_browser_scenario` with declared actions. See
   [runtime observation](references/runtime-observation.md) for connect/launch

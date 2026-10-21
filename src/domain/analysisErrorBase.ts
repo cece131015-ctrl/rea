@@ -210,6 +210,7 @@ import type {
   ArtifactExtractionPartialObservation,
 } from "./artifactPartialObservation.js";
 import type { WebScriptExportPartialObservation } from "./webScriptExport.js";
+import type { WebMirrorExportPartialObservation } from "./webMirror.js";
 import type { JavaScriptRecoveryPartialObservation } from "./javascript/javascriptRecovery.js";
 import type { BrowserScenarioPartialObservation } from "./browserScenarioCapture.js";
 import type { Evidence } from "./evidence.js";
@@ -253,6 +254,7 @@ export type AnalysisPartialObservation =
   | ArtifactInventoryPartialObservation
   | ArtifactExtractionPartialObservation
   | WebScriptExportPartialObservation
+  | WebMirrorExportPartialObservation
   | JavaScriptRecoveryPartialObservation
   | Evidence
   | BinaryLayout

@@ -179,6 +179,7 @@
     "verify:macos-bundle": "npm run build:cached && node scripts/verify/apple/macos-bundle.mjs",
     "verify:legacy-simulator": "npm run build:cached && node scripts/verify/apple/legacy-simulator.mjs",
     "verify:architecture-guards": "node scripts/verify/architecture-guards.mjs",
+    "verify:website-clone": "npm run build:cached && node scripts/verify-website-clone.mjs",
     "verify:apktool": "npm run build:cached && node scripts/verify-apktool.mjs",
     "verify:pcap": "npm run build:cached && node scripts/verify-pcap.mjs",
     "verify:flutter": "npm run build:cached && node scripts/verify-flutter.mjs",

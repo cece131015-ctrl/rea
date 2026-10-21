@@ -84,6 +84,20 @@ export const WEB_SCRIPT_EXPORT_PROVIDER = {
   version: "1",
 } as const;
 
+/** Provider identity for verified website mirrors of captured responses. */
+export const WEB_MIRROR_EXPORT_PROVIDER = {
+  id: "rea-web-mirror-export",
+  name: "REA captured website mirror",
+  version: "1",
+} as const;
+
+/** Provider identity for discovery and copies of locally installed applications. */
+export const LOCAL_APPLICATION_PROVIDER = {
+  id: "rea-local-applications",
+  name: "REA local application discovery",
+  version: "1",
+} as const;
+
 /** Provider identity for deterministic static JavaScript application analysis. */
 export const JAVASCRIPT_APPLICATION_PROVIDER = {
   id: "rea-javascript-application",

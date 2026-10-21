@@ -1,15 +1,13 @@
-import { createHash } from "node:crypto";
-
 import type {
   CapturedWebScript,
   ExportedWebScript,
 } from "./webScriptExport.js";
 import { urlDeclaresQueryOrFragment } from "./urlComponents.js";
-
-const hash = (text: string): string =>
-  createHash("sha256").update(text).digest("hex");
-const PORTABLE_SEGMENT = /^[A-Za-z0-9_~.-]+$/u;
-const RESERVED_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
+import {
+  conflictingPaths,
+  isPortablePathSegment,
+  sha256Text,
+} from "./webExportPaths.js";
 
 /** One planned file, or an explicit missing source with no filesystem effect. */
 export interface PlannedWebScript {
@@ -22,7 +20,7 @@ export const planWebScriptExport = (
   scripts: readonly CapturedWebScript[],
 ): readonly PlannedWebScript[] => {
   const candidates = scripts.map(candidatePath);
-  const conflicts = conflictingPaths(candidates);
+  const conflicts = conflictingPaths(candidates.map(({ path }) => path));
   return scripts.map((script, index) => {
     if (script.content.state === "unavailable")
       return {
@@ -45,9 +43,7 @@ export const planWebScriptExport = (
         url: script.url,
         content: {
           state: "exported",
-          relative_path:
-            path ??
-            `isolated/source-${index + 1}-${hash(JSON.stringify(script.source))}.js`,
+          relative_path: path ?? isolatedScriptPath(script, index),
           layout: path === undefined ? "isolated" : "url-path",
           layout_reason: reason,
           sha256: script.content.sha256,
@@ -60,6 +56,13 @@ export const planWebScriptExport = (
     };
   });
 };
+
+/** The collision-free name for a source whose URL path cannot be kept. */
+export const isolatedScriptPath = (
+  script: CapturedWebScript,
+  index: number,
+): string =>
+  `isolated/source-${index + 1}-${sha256Text(JSON.stringify(script.source))}.js`;
 
 interface CandidatePath {
   readonly path?: string;
@@ -80,20 +83,13 @@ const candidatePath = (script: CapturedWebScript): CandidatePath => {
   const parts = url.pathname.slice(1).split("/");
   if (
     !/\.(?:js|mjs|cjs)$/u.test(url.pathname) ||
-    parts.some(
-      (part) =>
-        !PORTABLE_SEGMENT.test(part) ||
-        part === "." ||
-        part === ".." ||
-        part.endsWith(".") ||
-        RESERVED_SEGMENT.test(part),
-    )
+    !parts.every(isPortablePathSegment)
   )
     return {
       reason: "URL path is not an ordinary portable JavaScript module path.",
     };
   return {
-    path: `origins/${hash(url.origin)}/${parts.join("/")}`,
+    path: `origins/${sha256Text(url.origin)}/${parts.join("/")}`,
     reason:
       urlDeclaresQueryOrFragment(url) ||
       url.username !== "" ||
@@ -101,32 +97,4 @@ const candidatePath = (script: CapturedWebScript): CandidatePath => {
         ? "URL query, fragment, or credentials cannot select a canonical local module."
         : null,
   };
-};
-
-// Register every exact prefix so a repeated path, or a file that is also a
-// directory prefix, isolates every affected source. Case-distinct spellings
-// stay distinct until the destination filesystem reports a collision.
-const conflictingPaths = (
-  candidates: readonly CandidatePath[],
-): Set<number> => {
-  const prefixes = new Map<string, { indices: number[]; files: number[] }>();
-  candidates.forEach(({ path }, index) => {
-    if (path === undefined) return;
-    const parts = path.split("/");
-    parts.forEach((_, position) => {
-      const spelling = parts.slice(0, position + 1).join("/");
-      const entry = prefixes.get(spelling) ?? { indices: [], files: [] };
-      entry.indices.push(index);
-      if (position === parts.length - 1) entry.files.push(index);
-      prefixes.set(spelling, entry);
-    });
-  });
-  const conflicts = new Set<number>();
-  for (const entry of prefixes.values())
-    if (
-      entry.files.length > 1 ||
-      (entry.files.length > 0 && entry.indices.length > entry.files.length)
-    )
-      for (const index of entry.indices) conflicts.add(index);
-  return conflicts;
 };

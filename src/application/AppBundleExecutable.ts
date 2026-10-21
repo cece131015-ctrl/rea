@@ -261,11 +261,18 @@ const resolveLayoutExecutable = async (
 };
 
 /** Decode the top-level executable name with an XML parser, not a pattern. */
-const parseXmlPlistExecutable = (plist: string): string => {
-  // An unrelated `__proto__` entry must not make the bundle unreadable.
-  const { value } = parseXmlPropertyList(plist);
-  return executableName(value);
-};
+const parseXmlPlistExecutable = (plist: string): string =>
+  executableName(parseXmlPlistValue(plist));
+
+// An unrelated `__proto__` entry must not make the bundle unreadable.
+const parseXmlPlistValue = (plist: string): unknown =>
+  parseXmlPropertyList(plist).value;
+
+/** Decode one app Info.plist (binary or XML) in-process into its root value. */
+export const decodeAppInfoPlist = (plist: Buffer): unknown =>
+  hasBinaryPlistSignature(plist)
+    ? parseBinaryPlistValue(plist)
+    : parseXmlPlistValue(decodeXmlPlistText(plist));
 
 const executableName = (value: unknown): string => {
   const executable = executableEntrySchema.safeParse(value);
@@ -276,11 +283,14 @@ const executableName = (value: unknown): string => {
 const executableEntrySchema = z.looseObject({ CFBundleExecutable: z.string() });
 
 /** Decode a binary plist in-process, so no host plist tool is required. */
-const parseBinaryPlistExecutable = (plist: Buffer): string => {
+const parseBinaryPlistExecutable = (plist: Buffer): string =>
+  executableName(parseBinaryPlistValue(plist));
+
+const parseBinaryPlistValue = (plist: Buffer): unknown => {
   preflightPropertyListDecode(plist, BINARY_PLIST_DECODE_BYTES);
   // `plist` assigns a `__proto__` key as the prototype; copying drops it, as
   // the XML path does.
-  return executableName(omitPrototypeKeys(parseBinary(plist)).value);
+  return omitPrototypeKeys(parseBinary(plist)).value;
 };
 
 const isSafeExecutableName = (name: string): boolean =>
