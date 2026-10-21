@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, parse, relative, resolve } from "node:path";
 
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { copyLocalApplication } from "../../artifacts/LocalApplicationCopy.js";
@@ -181,6 +181,13 @@ export const cloneLocalApplicationValidated = async (
         `The installed files of ${application.name} could not be resolved (${application.limitations.join(" ") || "no program path"}). Pass its install directory or executable as an absolute path.`,
       ),
     );
+  const unsafe = unsafeCopy(
+    application.root_path,
+    input.output_directory,
+    dependencies.host,
+  );
+  if (unsafe !== undefined)
+    return err(inputError(CLONE_OPERATION, ["application"], unsafe));
   const copied = await copyLocalApplication(
     {
       root: application.root_path,
@@ -242,6 +249,23 @@ export const cloneLocalApplicationValidated = async (
       locations: [{ kind: "artifact-path", path: input.output_directory }],
     }),
   );
+};
+
+/** Selections a copy must never make, whatever their source. */
+const unsafeCopy = (
+  root: string,
+  outputDirectory: string,
+  host: LocalApplicationHost,
+): string | undefined => {
+  const resolvedRoot = resolve(root);
+  if (resolvedRoot === parse(resolvedRoot).root)
+    return `Refusing to copy a filesystem root (${root}); select the application's own directory.`;
+  if (resolvedRoot === resolve(host.homeDirectory))
+    return `Refusing to copy the home directory (${root}); select the application's own directory.`;
+  const inside = relative(resolvedRoot, resolve(outputDirectory));
+  if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)))
+    return `output_directory ${outputDirectory} is inside the application being copied (${root}); choose a directory outside it.`;
+  return undefined;
 };
 
 const inputError = (

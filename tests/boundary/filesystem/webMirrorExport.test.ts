@@ -245,3 +245,52 @@ describe("export_web_mirror ownership", () => {
     expect(result.capture.source_evidence_id).toBe(evidence.evidence_id);
   });
 });
+
+describe("export_web_mirror view eligibility", () => {
+  it("rewrites ASCII under a declared single-byte charset and keeps other bytes exact", async () => {
+    const ascii = Buffer.from(`<img src="/img/logo.png">`);
+    const latin = Buffer.from([
+      ...Buffer.from(`<img src="/img/logo.png">`),
+      0xe9,
+    ]);
+    const { input, resources } = await setup(
+      captureEvidence([
+        {
+          url: "https://fixture.test/",
+          bytes: ascii,
+          resourceType: "document",
+          mediaType: "text/html; charset=ISO-8859-1",
+        },
+        {
+          url: "https://fixture.test/latin.html",
+          bytes: latin,
+          resourceType: "document",
+          mediaType: "text/html; charset=windows-1252",
+        },
+        {
+          url: "https://fixture.test/img/logo.png",
+          bytes: logo,
+          resourceType: "image",
+          mediaType: "image/png",
+        },
+      ]),
+    );
+    const result = await exportWebMirror(input, resources);
+    if (!result.ok) throw result.error;
+    const value = webMirrorExportResultSchema.parse(
+      result.value.normalized_result,
+    );
+    expect(value.coverage.views).toBe(1);
+    expect(value.entry?.view_path).toBe(
+      "view/https_fixture.test_443/index.html",
+    );
+    expect(value.limitations.join(" ")).toContain(
+      "non-ASCII bytes under another declared charset",
+    );
+    expect(
+      await readFile(
+        join(input.output_directory, "files/https_fixture.test_443/latin.html"),
+      ),
+    ).toEqual(latin);
+  });
+});

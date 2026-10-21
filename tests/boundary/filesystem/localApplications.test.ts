@@ -224,29 +224,29 @@ describe("find_local_applications on Linux and Windows hosts", () => {
   );
 });
 
-describe("clone_local_application", () => {
-  const setup = async () => {
-    const root = await createTestTempDirectory("rea-local-apps-clone-");
-    const resources = new ArtifactResourceScope();
-    onTestFinished(() => resources.close());
-    const host: LocalApplicationHost = {
-      platform: "linux",
-      environment: {},
-      homeDirectory: root,
-    };
-    const apps = join(root, "apps");
-    await mkdir(join(apps, "Viewer", "resources"), { recursive: true });
-    await mkdir(join(apps, "Viewer Pro"), { recursive: true });
-    await writeFile(join(apps, "Viewer", "viewer"), "binary");
-    await writeFile(join(apps, "Viewer", "resources", "app.asar"), "archive");
-    await symlink(join(root, "outside"), join(apps, "Viewer", "link"));
-    return { root, apps, host, resources };
+const cloneSetup = async () => {
+  const root = await createTestTempDirectory("rea-local-apps-clone-");
+  const resources = new ArtifactResourceScope();
+  onTestFinished(() => resources.close());
+  const host: LocalApplicationHost = {
+    platform: "linux",
+    environment: {},
+    homeDirectory: root,
   };
+  const apps = join(root, "apps");
+  await mkdir(join(apps, "Viewer", "resources"), { recursive: true });
+  await mkdir(join(apps, "Viewer Pro"), { recursive: true });
+  await writeFile(join(apps, "Viewer", "viewer"), "binary");
+  await writeFile(join(apps, "Viewer", "resources", "app.asar"), "archive");
+  await symlink(join(root, "outside"), join(apps, "Viewer", "link"));
+  return { root, apps, host, resources };
+};
 
+describe("clone_local_application", () => {
   it_(
     "copies a uniquely selected directory with digests and analysis inputs",
     async () => {
-      const { root, apps, host, resources } = await setup();
+      const { root, apps, host, resources } = await cloneSetup();
       const output = join(root, "copy");
       const result = await cloneLocalApplication(
         {
@@ -287,7 +287,7 @@ describe("clone_local_application", () => {
   it_(
     "lists candidates for an ambiguous name and copies a selected file by path",
     async () => {
-      const { root, apps, host, resources } = await setup();
+      const { root, apps, host, resources } = await cloneSetup();
       const ambiguous = await cloneLocalApplication(
         {
           application: "view",
@@ -327,7 +327,7 @@ describe("clone_local_application", () => {
   it_(
     "refuses an existing destination and a missing name without writing",
     async () => {
-      const { root, apps, host, resources } = await setup();
+      const { root, apps, host, resources } = await cloneSetup();
       await writeFile(join(root, "taken"), "keep");
       const existing = await cloneLocalApplication(
         {
@@ -353,9 +353,57 @@ describe("clone_local_application", () => {
       );
     },
   );
+});
+
+describe("clone_local_application safety", () => {
+  it_(
+    "never selects a filesystem root, the home directory or its own output",
+    async () => {
+      const { root, apps, host, resources } = await cloneSetup();
+      for (const [application, output, message] of [
+        ["/", join(root, "a"), "filesystem root"],
+        [root, join(root, "b"), "home directory"],
+        [
+          join(apps, "Viewer"),
+          join(apps, "Viewer", "copy"),
+          "inside the application",
+        ],
+      ] as const) {
+        const result = await cloneLocalApplication(
+          { application, output_directory: output },
+          { host, resources },
+        );
+        if (result.ok) throw new Error(`Expected ${application} to be refused`);
+        expect(JSON.stringify(projectAnalysisError(result.error))).toContain(
+          message,
+        );
+      }
+      expect((await readdir(root)).sort()).toEqual(["apps"]);
+    },
+  );
+
+  it_(
+    "selects only the program file when it is not in a package directory",
+    async () => {
+      const { root, host } = await cloneSetup();
+      const loose = join(root, "loose");
+      await mkdir(join(loose, "unrelated"), { recursive: true });
+      await executable(join(loose, "tool"));
+      await writeFile(
+        join(loose, "tool.desktop"),
+        `[Desktop Entry]\nType=Application\nName=Loose Tool\nExec=${join(loose, "tool")}\n`,
+      );
+      const discovery = await find(host, "loose tool", [loose]);
+      expect(discovery.matches[0]).toMatchObject({
+        root_path: join(loose, "tool"),
+        root_kind: "file",
+        limitations: [expect.stringContaining("only its executable file")],
+      });
+    },
+  );
 
   it_("rolls back a cancelled copy", async () => {
-    const { root, apps, host, resources } = await setup();
+    const { root, apps, host, resources } = await cloneSetup();
     const controller = new AbortController();
     controller.abort();
     const result = await cloneLocalApplication(

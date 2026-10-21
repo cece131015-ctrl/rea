@@ -70,8 +70,9 @@ CSS Syntax Level 3 tokenizer, so URLs in comments and strings are ignored.
 - `<base href>` becomes `./`. `integrity` and `crossorigin` are removed only from
   elements whose reference now points to a local copy.
 
-HTML or CSS that is not valid UTF-8, or that declares another charset, keeps
-only its exact file. JavaScript is never rewritten: root-relative or computed
+HTML or CSS that is not valid UTF-8, or that has non-ASCII bytes under another
+declared charset, keeps only its exact file; pure ASCII is rewritten under any
+ASCII-compatible charset. JavaScript is never rewritten: root-relative or computed
 URLs inside scripts stay unresolved, Chromium does not run module scripts from
 `file://` URLs, and opening the view runs the captured JavaScript in your
 browser.

@@ -56,9 +56,13 @@ const SHARED_NAMESPACE = /^(?:[A-Za-z0-9_]+-linux-gnu[A-Za-z0-9_]*|jvm)$/u;
 
 /**
  * The package directory that contains a resolved program: the first segment
- * below a known install container, otherwise the program's own directory.
+ * below a known install container. Anywhere else the directory around the
+ * program may hold unrelated software, so only the program file is selected.
  */
-const installRoot = (program: string, host: LocalApplicationHost): string => {
+const installRoot = (
+  program: string,
+  host: LocalApplicationHost,
+): { readonly path: string; readonly kind: "directory" | "file" } => {
   for (const container of installContainers(host)) {
     const inside = relative(container, program);
     if (inside === "" || inside.startsWith("..") || isAbsolute(inside))
@@ -66,10 +70,13 @@ const installRoot = (program: string, host: LocalApplicationHost): string => {
     const segments = inside.split(sep);
     const depth = SHARED_NAMESPACE.test(segments[0] ?? "") ? 2 : 1;
     // A program directly in the container (or namespace) has no package root.
-    if (segments.length <= depth) return dirname(program);
-    return join(container, ...segments.slice(0, depth));
+    if (segments.length <= depth) return { path: program, kind: "file" };
+    return {
+      path: join(container, ...segments.slice(0, depth)),
+      kind: "directory",
+    };
   }
-  return dirname(program);
+  return { path: program, kind: "file" };
 };
 
 const isExecutableFile = async (path: string): Promise<boolean> => {
@@ -168,12 +175,18 @@ export const desktopEntryCandidate = async (
     rootPath = sandbox;
     rootKind = "directory";
   } else if (resolved !== undefined) {
-    const shared = sharedBinDirectories(host).has(dirname(resolved));
-    rootPath = shared ? resolved : installRoot(resolved, host);
-    rootKind = shared ? "file" : "directory";
-    if (shared)
+    const root = sharedBinDirectories(host).has(dirname(resolved))
+      ? undefined
+      : installRoot(resolved, host);
+    rootPath = root?.path ?? resolved;
+    rootKind = root?.kind ?? "file";
+    if (root === undefined)
       limitations.push(
         "The program lives in a shared command directory, so only its executable file is selected; libraries and data it loads from elsewhere are not included.",
+      );
+    else if (root.kind === "file")
+      limitations.push(
+        "The program is not inside a package directory under a known install location, so only its executable file is selected; pass the install directory as an absolute path to copy it.",
       );
   } else
     limitations.push(
