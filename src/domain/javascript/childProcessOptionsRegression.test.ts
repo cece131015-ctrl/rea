@@ -52,6 +52,36 @@ describe("child-process options detection", () => {
     ]);
   });
 
+  it("reads fork's silent option when stdio is not a string or array", () => {
+    const ir = analyzeJavaScriptSemantics(`
+      import { fork, spawn } from "node:child_process";
+
+      fork("piped.js", { silent: true });
+      fork("inherited.js", [], { silent: false });
+      fork("nullish-stdio.js", { silent: 1, stdio: null });
+      fork("explicit-stdio.js", { silent: true, stdio: "inherit" });
+      fork("dynamic.js", { silent: process.env.QUIET });
+      spawn("tool", { silent: true });
+      fork("boolean-stdio.js", { stdio: false, silent: true });
+      fork("object-stdio.js", { stdio: {}, silent: false });
+      fork("unresolved-stdio.js", { stdio: streams, silent: true });
+      spawn("tool", { stdio: false });
+    `);
+
+    expect(ir.childProcessSpawns.map(({ stdioMode }) => stdioMode)).toEqual([
+      "pipe",
+      "default",
+      "pipe",
+      "inherit",
+      "dynamic",
+      "default",
+      "pipe",
+      "default",
+      "dynamic",
+      "dynamic",
+    ]);
+  });
+
   it("preserves behavior with explicit args arrays", () => {
     const ir = analyzeJavaScriptSemantics(`
       import { spawn, execFile, fork } from "node:child_process";

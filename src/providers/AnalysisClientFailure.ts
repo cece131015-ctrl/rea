@@ -13,6 +13,7 @@ import {
   AnalysisAccessDeniedError,
   AnalysisArtifactChangedError,
   AnalysisResourceConstraintError,
+  resourceConstraintRecovery,
   AnalysisOutputError,
   AnalysisTimeoutError,
 } from "../domain/analysisErrorCore.js";
@@ -58,6 +59,7 @@ export const analysisClientFailureContext = (
         };
   return {
     cause,
+    ...(cause.limit === undefined ? {} : { limit: cause.limit }),
     ...(cause.cleanupPrimary === undefined
       ? {}
       : {
@@ -237,15 +239,7 @@ export const analysisClientFailureForOperation = (
       cause.resource,
       cause.reason,
       cause.reportedLimits,
-      {
-        ...context,
-        ...(cause.retryable === undefined
-          ? {}
-          : { retryable: cause.retryable }),
-        ...(cause.remediationAction === undefined
-          ? {}
-          : { remediationAction: cause.remediationAction }),
-      },
+      { ...context, ...resourceConstraintRecovery(cause) },
     );
   else
     result = new ProviderAdapterError(providerId, operation, {

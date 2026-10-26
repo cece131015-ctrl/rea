@@ -60,6 +60,9 @@ const consumeEscape = (
   return { value: valid ? String.fromCodePoint(code) : "�", next: end };
 };
 
+// Image functions whose plain string arguments are URLs (CSS Images 4).
+const IMAGE_SET_FUNCTIONS = new Set(["image-set", "-webkit-image-set"]);
+
 /**
  * Tokenize enough of CSS Syntax Level 3 to find every URL reference: comments,
  * strings and escapes are honored so URL-like text inside them is ignored.
@@ -67,9 +70,12 @@ const consumeEscape = (
  */
 export const cssUrlReferences = (text: string): CssUrlReference[] => {
   const references: CssUrlReference[] = [];
-  // A string token is a URL when it follows `url(` or `@import`.
+  // A string token is a URL when it follows `url(` or `@import`, or is a
+  // direct argument of an image-set function.
   let expectUrlString = false;
   let expectImport = false;
+  // Lowercase names of the open functions; "" for a plain parenthesis block.
+  const functions: string[] = [];
   let index = 0;
   while (index < text.length) {
     const character = text[index];
@@ -84,7 +90,12 @@ export const cssUrlReferences = (text: string): CssUrlReference[] => {
     }
     if (character === '"' || character === "'") {
       const token = consumeString(text, index, character);
-      if (!token.bad && (expectUrlString || expectImport))
+      if (
+        !token.bad &&
+        (expectUrlString ||
+          expectImport ||
+          IMAGE_SET_FUNCTIONS.has(functions.at(-1) ?? ""))
+      )
         references.push({
           kind: "string",
           url: token.value.trim(),
@@ -116,10 +127,12 @@ export const cssUrlReferences = (text: string): CssUrlReference[] => {
       const start = index;
       const name = consumeName(text, index);
       index = name.next;
-      if (name.value.toLowerCase() === "url" && text[index] === "(") {
+      const functionName = name.value.toLowerCase();
+      if (functionName === "url" && text[index] === "(") {
         let next = index + 1;
         while (isWhitespace(text[next])) next += 1;
         if (text[next] === '"' || text[next] === "'") {
+          functions.push(functionName);
           expectUrlString = true;
           expectImport = false;
           index = next;
@@ -133,11 +146,16 @@ export const cssUrlReferences = (text: string): CssUrlReference[] => {
             range: { start, end: token.next },
           });
         index = token.next;
+      } else if (text[index] === "(") {
+        functions.push(functionName);
+        index += 1;
       }
       expectUrlString = false;
       expectImport = false;
       continue;
     }
+    if (character === "(") functions.push("");
+    else if (character === ")") functions.pop();
     if (startsEscape(text, index)) index = consumeEscape(text, index + 1).next;
     else index += 1;
     expectUrlString = false;

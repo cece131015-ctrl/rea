@@ -422,30 +422,18 @@ describe.skipIf(process.platform === "win32")(
   "PSP inspected ABI declaration boundary",
   () => {
     it("refuses a PSP image whose section headers lie beyond the captured file", async () => {
-      const { directory, provider } = await installation();
+      const { directory } = await installation();
       const path = join(directory, "psp-truncated-sections.elf");
       await writeFile(path, pspElfBytes({ sectionHeadersBeyondEof: true }));
       const parsed = await parseBinaryTarget(path);
-      if (!parsed.ok) throw parsed.error;
-      if (
-        parsed.value.kind !== "executable" ||
-        parsed.value.architecture !== "mips"
-      )
-        throw new Error("PSP ELF was not recognized as MIPS");
-      expect(parsed.value.mips.abiFlags).toEqual(pspAbiFlags);
-      expect(parsed.value.mips.limitations).toContainEqual(
-        expect.stringContaining("ABI declarations in unavailable headers"),
-      );
-      expect(provider.inspectTargetSupport(parsed.value).status).toBe(
-        "unsupported",
-      );
-      const result = await provider.resolveAnalysisProfile(parsed.value);
-      expect(result.ok).toBe(false);
-      if (result.ok) throw new Error("Incomplete ABI inspection was admitted");
-      expect(result.error._tag).toBe("AnalysisUnsupportedTargetError");
-      expect(result.error.message).toContain(
-        "MIPS ABI declaration inspection is incomplete",
-      );
+      expect(parsed).toMatchObject({
+        ok: false,
+        error: {
+          _tag: "BinaryTargetError",
+          constraint: "file_format_rejected",
+          reason: expect.stringContaining("truncated ELF section header table"),
+        },
+      });
     });
 
     it("retains independently inspected PSP ABI bytes through the real target reader", async () => {
@@ -559,10 +547,16 @@ describe.skipIf(process.platform === "win32")(
       expect(result.ok).toBe(false);
       if (result.ok)
         throw new Error("Conflicting language override was accepted");
-      expect(result.error._tag).toBe("AnalysisUnsupportedTargetError");
-      expect(result.error.message).toContain(
-        "does not accept REA_GHIDRA_LANGUAGE_ID overrides",
-      );
+      expect(result.error).toMatchObject({
+        _tag: "ConfigurationError",
+        settings: [
+          {
+            setting: "REA_GHIDRA_LANGUAGE_ID",
+            constraint:
+              "The bounded PSP Allegrex profile does not accept processor or compiler specification overrides.",
+          },
+        ],
+      });
     });
 
     it("keeps PSP and generic language-override launch paths mutually exclusive", () => {
@@ -750,8 +744,9 @@ describe.skipIf(process.platform === "win32")(
       controls.directory = (handle) => {
         controls.directory = undefined;
         vi.spyOn(handle, "read").mockRejectedValue(readFailure);
-        const close = handle.close.bind(handle);
-        vi.spyOn(handle, "close").mockImplementation(async () => {
+        const directory: { close(): Promise<void> } = handle;
+        const close = directory.close.bind(handle);
+        vi.spyOn(directory, "close").mockImplementation(async () => {
           closes++;
           await close();
           controller.abort({ caller: "directory finalization" });

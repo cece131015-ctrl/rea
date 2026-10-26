@@ -4,9 +4,9 @@ import { lstat } from "node:fs/promises";
 import { basename } from "node:path";
 import { pipeline } from "node:stream/promises";
 
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { translateArtifactFailure } from "./ArtifactProvider.js";
+import { translateArtifactFailure } from "./ArtifactOperationFailure.js";
 import { ArtifactReaderFailure } from "./ArtifactReader.js";
 import type { ArtifactResourceScope } from "./ArtifactResourceScope.js";
 import { extractArtifactWithInventory } from "./extraction/ArtifactExtraction.js";
@@ -70,7 +70,12 @@ export const copyLocalApplication = async (
     }
     return ok(await copyFile(request, signal));
   } catch (cause: unknown) {
-    return err(translateArtifactFailure(OPERATION, cause));
+    return err(
+      translateArtifactFailure(
+        OPERATION,
+        copyFailure(request.root, cause, signal),
+      ),
+    );
   }
 };
 
@@ -121,6 +126,7 @@ const copyFile = async (
       );
     const expected = await digestFile(request.root, signal);
     let tree: SafeOutputTree | undefined;
+    let facts: LocalApplicationCopyFacts | undefined;
     try {
       tree = await SafeOutputTree.create(request.outputDirectory);
       // The write re-hashes the streamed bytes, so a file that changed after
@@ -131,8 +137,7 @@ const copyFile = async (
         expected,
         signal,
       );
-      await tree.commit(signal);
-      return {
+      facts = {
         files: 1,
         bytes: expected.bytes,
         filesSha256: expected.sha256,
@@ -141,27 +146,52 @@ const copyFile = async (
           "A single executable file was copied; libraries, resources and data it loads from other locations are not included.",
         ],
       };
+      await tree.commit(signal);
+      return facts;
     } catch (cause: unknown) {
       if (cause instanceof SafeOutputTreeCreationFailure) tree = cause.tree;
-      if (tree !== undefined && !tree.published) {
-        const cleanup = await request.resources.release({
-          kind: "output-tree",
-          resource: tree.outputRoot,
-          tree,
-        });
-        if (cleanup.kind === "failed")
-          throw new ArtifactReaderFailure(
-            "io",
-            `Copy failed and rollback did not complete; remove ${tree.outputRoot} before retrying.`,
-            {
-              cause,
-              cleanup: {
-                reason: "output rollback failed",
-                resources: [tree.outputRoot],
-              },
-            },
-          );
-      }
+      if (tree === undefined) throw cause;
+      // Release rolls back unpublished output and retries descriptor cleanup
+      // after a publication; a failed attempt stays owned by the scope.
+      const cleanup = await request.resources.release({
+        kind: "output-tree",
+        resource: tree.outputRoot,
+        tree,
+      });
+      if (cleanup.kind === "failed")
+        throw request.resources.cleanupFailure({ kind: "failed", cause }, [
+          cleanup,
+        ]);
+      if (tree.published && facts !== undefined) return facts;
       throw cause;
     }
   });
+
+/**
+ * Keep typed failures; name the caller's cancellation and the source path of
+ * a raw host failure instead of reducing them to an anonymous I/O error.
+ */
+const copyFailure = (
+  path: string,
+  cause: unknown,
+  signal: AbortSignal | undefined,
+): unknown => {
+  if (cause instanceof ArtifactReaderFailure || cause instanceof AnalysisError)
+    return cause;
+  if (signal?.aborted === true)
+    return new ArtifactReaderFailure(
+      "cancelled",
+      "Application copy was cancelled.",
+      {
+        cause,
+        cancellation: { reason: signal.reason },
+      },
+    );
+  const code =
+    cause instanceof Error && "code" in cause ? String(cause.code) : "";
+  return new ArtifactReaderFailure(
+    code === "ENOENT" || code === "ENOTDIR" ? "path" : "io",
+    `Could not read the application at ${path}${code === "" ? "" : ` (${code})`}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    { cause },
+  );
+};

@@ -11,7 +11,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { parseEvidence } from "../../dist/domain/evidence.js";
 import { analysisProfileSchema } from "../../dist/domain/analysisProfile.js";
 import { nativeValueTraceSchema } from "../../dist/domain/native/nativeValueTrace.js";
-import { requireMcpLifecycleResult } from "./mcp-verifier-results.mjs";
+import {
+  requireMcpEvidenceBundle,
+  requireMcpLifecycleResult,
+} from "./mcp-verifier-results.mjs";
 import { verifyGhidraBoundaries } from "./real-ghidra-boundaries.mjs";
 
 const defaultEntrypoint = fileURLToPath(new URL("../rea.mjs", import.meta.url));
@@ -208,7 +211,10 @@ async function verifyNativeValueAdapters(
     assert.deepEqual(mcpEvidence.normalized_result, mcpGraph);
     assert.deepEqual(mcpGraph, cliGraph);
     const analyzed = await client.callTool(
-      { name: "analyze_function", arguments: { procedure } },
+      {
+        name: "analyze_function",
+        arguments: { procedure, detail: "complete" },
+      },
       { timeout: 180000 },
     );
     assert.notEqual(analyzed.isError, true, JSON.stringify(analyzed));
@@ -269,18 +275,22 @@ async function verifyNativeValueAdapters(
       comparisonEvidence.evidence_links.includes(functionEvidence.evidence_id),
     );
     await verifyUnresolvedCallEvidence(client);
-    const bundle = await client.callTool({
+    const bundleReply = await client.callTool({
       name: "get_evidence_bundle",
       arguments: {},
     });
-    assert.notEqual(bundle.isError, true, JSON.stringify(bundle));
+    assert.ok(
+      bundleReply.structuredContent,
+      "MCP omitted structured Evidence bundle",
+    );
+    const bundle = requireMcpEvidenceBundle(bundleReply);
     for (const evidence of [
       mcpEvidence,
       functionEvidence,
       comparisonEvidence,
     ]) {
       assert.deepEqual(
-        bundle.structuredContent?.result?.records.find(
+        bundle.records.find(
           (record) => record.evidence_id === evidence.evidence_id,
         ),
         evidence,
@@ -350,7 +360,10 @@ async function verifyUnresolvedCallEvidence(client) {
     "Source fixture lacks the unresolved callback and its possible target",
   );
   const analyzed = await client.callTool(
-    { name: "analyze_function", arguments: { procedure: indirect.address } },
+    {
+      name: "analyze_function",
+      arguments: { procedure: indirect.address, detail: "complete" },
+    },
     { timeout: 180000 },
   );
   assert.notEqual(analyzed.isError, true, JSON.stringify(analyzed));

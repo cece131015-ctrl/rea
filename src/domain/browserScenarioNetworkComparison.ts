@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { BrowserScenarioCapture } from "./browserScenarioCapture.js";
+import type { RetainedBrowserScenarioCapture } from "./browserScenarioCapture.js";
 import type { BrowserScenarioNormalizationRule } from "./browserScenarioDiffValues.js";
 import { digestCanonicalValue } from "./canonicalDigest.js";
 import { normalizeScenarioValue } from "./browserScenarioNormalization.js";
@@ -7,8 +7,8 @@ import { normalizeScenarioValue } from "./browserScenarioNormalization.js";
 /** Numeric links are temporary local indices, never durable transaction identity. */
 export const scenarioNetworkTransactionSchema = z.strictObject({
   events: z.array(z.unknown()),
-  predecessor: z.number().int().min(-2),
-  step_index: z.number().int().min(0),
+  predecessor: z.int().min(-2),
+  step_index: z.int().min(0),
 });
 export type ScenarioNetworkTransaction = z.infer<
   typeof scenarioNetworkTransactionSchema
@@ -16,7 +16,7 @@ export type ScenarioNetworkTransaction = z.infer<
 
 /** Project each transaction once, retaining ancestry as references rather than nested copies. */
 export const scenarioNetworkTransactions = (
-  capture: BrowserScenarioCapture,
+  capture: RetainedBrowserScenarioCapture,
 ): ScenarioNetworkTransaction[] => {
   const sourceSteps = new Map(
     capture.events.items.map((event) => [event.sequence, event.step_index]),
@@ -65,7 +65,7 @@ export const scenarioNetworkTransactions = (
         redirected_from_transaction_state: _state,
         ...network
       } = event;
-      evidence = network;
+      evidence = withoutRequestTiming(network);
       predecessor =
         request === undefined ? parent : request.redirected_from_transaction_id;
       predecessorState =
@@ -132,7 +132,7 @@ export const scenarioNetworkTransactions = (
 
 /** Missing or cyclic ancestry cannot support an unchanged claim. */
 export const scenarioNetworkCoverageReason = (
-  capture: BrowserScenarioCapture,
+  capture: RetainedBrowserScenarioCapture,
   nodes = scenarioNetworkTransactions(capture),
 ): string | undefined => {
   const finished = new Set<number>();
@@ -153,6 +153,21 @@ export const scenarioNetworkCoverageReason = (
     for (const item of path) finished.add(item);
   }
   return undefined;
+};
+
+/** Request times differ on every run, so comparisons leave them out. */
+const withoutRequestTiming = (event: object): object => {
+  const {
+    observed_at: _observed,
+    started_at: _started,
+    elapsed_ms: _elapsed,
+    ...rest
+  } = event as {
+    observed_at?: unknown;
+    started_at?: unknown;
+    elapsed_ms?: unknown;
+  };
+  return rest;
 };
 
 /** Hash normalized own evidence and its complete parent fingerprint in linear graph space. */

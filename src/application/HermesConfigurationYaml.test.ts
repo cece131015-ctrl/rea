@@ -7,6 +7,95 @@ import {
   stringifyHermesConfigurationYaml,
 } from "./HermesConfigurationYaml.js";
 
+for (const version of ["1.1", "1.2"] as const)
+  it.each(["refresh", "remove"] as const)(
+    `preserves YAML ${version} consumers of a replaced REA anchor during %s`,
+    (operation) => {
+      const original =
+        `${version === "1.2" ? "%YAML 1.2\n---\n" : ""}` +
+        "mcp_servers:\n  rea: &server\n    command: old-rea\n    args: [mcp]\n    env: &environment {MODE: 'on'}\n  other: *server # caller binding\nobserver: *server\nenvironment: *environment\n";
+      const before = parse(original, { version });
+      const updated = editHermesConfigurationYaml(
+        original,
+        ["mcp_servers", "rea"],
+        operation === "refresh"
+          ? { command: "new-rea", args: ["mcp"] }
+          : undefined,
+      );
+      expect(parse(updated, { version })).toEqual({
+        mcp_servers: {
+          ...(operation === "refresh"
+            ? { rea: { command: "new-rea", args: ["mcp"] } }
+            : {}),
+          other: before.mcp_servers.other,
+        },
+        observer: before.observer,
+        environment: before.environment,
+      });
+      expect(updated).toContain("# caller binding");
+      expect(
+        editHermesConfigurationYaml(
+          updated,
+          ["mcp_servers", "rea"],
+          operation === "refresh"
+            ? { command: "new-rea", args: ["mcp"] }
+            : undefined,
+        ),
+      ).toBe(updated);
+    },
+  );
+
+describe("Hermes YAML deletion", () => {
+  for (const version of ["1.1", "1.2"] as const) {
+    for (const [name, body, path] of [
+      [
+        "an aliased table",
+        "server_defaults: &servers\n  other:\n    command: other-server\n\nmcp_servers: *servers # Selected table\n",
+        ["mcp_servers", "rea"],
+      ],
+      [
+        "nested aliases",
+        "defaults: &defaults\n  other: {command: other-server}\nservers: &servers\n  mcp_servers: *defaults\nclient: *servers\nobserver: *servers\n",
+        ["client", "mcp_servers", "rea"],
+      ],
+      [
+        "shadowed anchors",
+        "first: &server {command: original}\ndefaults: &servers\n  other: *server\nsecond: &server {command: replacement}\nmcp_servers: *servers\nobserver: *server\n",
+        ["mcp_servers", "rea"],
+      ],
+      [
+        "shared consumers",
+        "defaults: &servers\n  other: &other {command: other-server}\nmcp_servers: *servers\nobserver: *servers\nother_observer: *other\n",
+        ["mcp_servers", "rea"],
+      ],
+      [
+        "an explicit flow table with CRLF",
+        "# Keep formatting\r\nmcp_servers: {other: {command: other-server}}\r\n",
+        ["mcp_servers", "rea"],
+      ],
+    ] as const) {
+      it(`preserves YAML ${version} bytes when deleting an absent key from ${name}`, () => {
+        const source = (version === "1.2" ? "%YAML 1.2\n---\n" : "") + body;
+        expect(editHermesConfigurationYaml(source, path, undefined)).toBe(
+          source,
+        );
+      });
+    }
+  }
+
+  for (const [name, reference] of [
+    ["cyclic", "servers"],
+    ["unresolved", "missing"],
+  ]) {
+    it(`still refuses deletion through a table containing a ${name} alias`, () => {
+      const source = `defaults: &servers\n  rea: {command: rea}\n  other: *${reference}\nmcp_servers: *servers\n`;
+      expect(() =>
+        editHermesConfigurationYaml(source, ["mcp_servers", "rea"], undefined),
+      ).toThrow(TypeError);
+    });
+  }
+});
+
 describe("Hermes configuration YAML", () => {
   it("retains a quoted sequence element when replacing its registration", () => {
     const source =

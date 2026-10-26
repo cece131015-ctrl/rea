@@ -12,8 +12,7 @@ import type {
 } from "./javascriptApplicationGraphSchemas.js";
 import {
   applicationFeatureTraceResultSchema,
-  applicationFeatureSeedSchema,
-  type ApplicationFeatureSeedInput,
+  type ApplicationFeatureSeed,
   type ApplicationFeatureTraceResult,
   type TraceApplicationFeatureInput,
 } from "./javascriptFeatureTraceSchemas.js";
@@ -32,23 +31,18 @@ export interface ApplicationFeatureTraceProjectionInput {
   readonly sourceEvidenceId: string;
   readonly graph: JavaScriptApplicationGraph;
   readonly nativeEvidence: readonly Evidence[];
-  readonly seed: ApplicationFeatureSeedInput;
+  readonly seed: ApplicationFeatureSeed;
   readonly direction: TraceApplicationFeatureInput["direction"];
 }
 
 /** Trace a literal feature through its complete reachable, authority-preserving JAG. */
 export const traceApplicationFeature = (
-  source: ApplicationFeatureTraceProjectionInput,
+  input: ApplicationFeatureTraceProjectionInput,
 ): ApplicationFeatureTraceResult => {
-  const input = {
-    ...source,
-    seed: applicationFeatureSeedSchema.parse(source.seed),
-  };
-  const allSeedMatches = findApplicationFeatureSeeds(
+  const seedMatches = findApplicationFeatureSeeds(
     input.graph.nodes,
     input.seed,
   );
-  const seedMatches = allSeedMatches;
   if (seedMatches.length === 0) return noMatchResult(input);
   const traversal = traverseApplicationFeature(
     input.graph,
@@ -58,8 +52,12 @@ export const traceApplicationFeature = (
   const graph = traceGraph(input, seedMatches, traversal);
   const paths = terminalPaths(traversal, seedMatches);
   const nativeHandoffs = buildJavaScriptNativeHandoffs(
-    traversal.nodes,
-    traversal.edges,
+    input.graph,
+    new Set(
+      traversal.nodes
+        .filter(({ kind }) => kind === "native-addon")
+        .map(({ node_id }) => node_id),
+    ),
     input.nativeEvidence,
   );
   const evidenceLinks = uniqueSorted([
@@ -86,7 +84,7 @@ export const traceApplicationFeature = (
     coverage: {
       status: traceCoverageStatus(input.graph),
       source_graph_status: input.graph.coverage.status,
-      total_seed_matches: allSeedMatches.length,
+      total_seed_matches: seedMatches.length,
     },
     evidence_links: evidenceLinks,
     limitations: traceLimitations(input.graph),

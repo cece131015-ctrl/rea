@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { AndroidRequest } from "../domain/android/androidAnalysis.js";
 import { androidResultSchemas } from "../domain/android/androidAnalysis.js";
+import { parseAndroidManifestComponents } from "./AndroidManifestComponents.js";
 import {
   AnalysisInputError,
   AnalysisOutputError,
@@ -8,7 +9,7 @@ import {
 import type { JsonValue } from "../domain/jsonValue.js";
 import {
   jadxAppSchema,
-  jadxClassPageSchema,
+  type JadxClassPage,
   jadxClassSchema,
   jadxLoadSchema,
   jadxMethodSchema,
@@ -18,6 +19,11 @@ import {
 
 /** The adapter consumes tool payloads, never provider RPC details outside this layer. */
 export interface JadxToolPort {
+  listClasses(input: {
+    readonly query: string;
+    readonly offset: number;
+    readonly limit: number;
+  }): Promise<JadxClassPage>;
   json(
     name: string,
     input: Readonly<Record<string, JsonValue>>,
@@ -65,8 +71,13 @@ const classSummary = async (
     { operation: "inspect_android_package" | "search_android_classes" }
   >,
 ): Promise<ClassSummary> => {
+  // Only class inspection reports DEX static values; method and reference
+  // lookups keep the member-only summary so large constants cannot block them.
   const raw = await tools.json("get_class_summary", {
     class_name: request.input.class_name,
+    ...(request.operation === "inspect_android_class"
+      ? { dex_static_values: true }
+      : {}),
   });
   if (
     raw !== null &&
@@ -86,7 +97,10 @@ const classSummary = async (
       { cause: summary.error },
     );
   const value = summary.data;
-  if (value.full_name !== request.input.class_name)
+  if (
+    value.full_name !== request.input.class_name &&
+    value.raw_name !== request.input.class_name
+  )
     inputFailure(
       request,
       "class_name",
@@ -122,6 +136,12 @@ const inspectPackage = async (
     target_sdk: app.target_sdk || null,
     permissions: app.permissions,
     manifest,
+    components: parseAndroidManifestComponents(
+      manifest.text,
+      manifest.status,
+      app.target_sdk || null,
+      app.min_sdk || null,
+    ),
     class_count: loaded.class_count,
     resource_count: loaded.resource_count,
     signature_verification: "not_performed",
@@ -138,13 +158,11 @@ const searchClasses = async (
   const pageSize = 4096;
   let offset = 0;
   do {
-    const page = jadxClassPageSchema.parse(
-      await tools.json("list_classes", {
-        query: request.input.query,
-        offset,
-        limit: pageSize,
-      }),
-    );
+    const page = await tools.listClasses({
+      query: request.input.query,
+      offset,
+      limit: pageSize,
+    });
     if (
       page.total_classes !== loaded.class_count ||
       page.offset !== offset ||
@@ -230,7 +248,7 @@ const inspectMethod = async (
     );
   const body = jadxMethodSchema.parse(
     await tools.json("get_method_body", {
-      class_name: summary.full_name,
+      class_name: request.input.class_name,
       method_name: request.input.method_name,
       overload_index: index,
       smali_fallback: true,
@@ -280,6 +298,7 @@ export const analyzeJadxRequest = async (
       fields: summary.fields.map((field) => ({
         name: field.name,
         reported_type: field.type,
+        dex_static_value: field.dex_static_value ?? null,
       })),
       inner_classes: summary.inner_classes,
     });
@@ -324,7 +343,7 @@ const traceReferences = async (
     await tools.json(
       methodName === undefined ? "get_xrefs_to_class" : "get_xrefs_to_method",
       {
-        class_name: summary.full_name,
+        class_name: request.input.class_name,
         ...(methodName === undefined
           ? {}
           : { method_name: methodName, overload_index: index }),

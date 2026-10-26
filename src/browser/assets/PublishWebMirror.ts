@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
@@ -22,7 +23,10 @@ import {
   planWebMirror,
   type PlannedMirrorFile,
 } from "../../domain/webMirrorPlan.js";
-import type { WebCaptureExportErrorFactory } from "../../domain/webScriptExportError.js";
+import type {
+  WebCaptureExportErrorFactory,
+  WebCaptureExportOperation,
+} from "../../domain/webScriptExportError.js";
 import type { SelectedMirrorCapture } from "./MirrorCapture.js";
 import {
   destinationCollisionReason,
@@ -41,6 +45,8 @@ const LIMITATIONS = [
 ];
 const NO_VIEW_LIMITATION =
   "Some HTML or CSS bytes were not valid UTF-8, or used non-ASCII bytes under another declared charset; their references were not rewritten and only the exact files are available.";
+const NO_URL_VIEW_LIMITATION =
+  "Some HTML or CSS responses have no absolute URL to resolve their references against; only their exact files are available.";
 const MAX_REDIRECT_HOPS = 20;
 // Absolute file:// links do not survive a moved directory, so the generated
 // page uses a relative link; HTML-escaping keeps it inert.
@@ -60,11 +66,18 @@ const indexPage = (target: string): Buffer => {
 export interface MirrorCaptureFile {
   readonly path: string;
   readonly sha256: string;
-  /** Exact capture bytes to write as capture.json inside the mirror. */
-  readonly persist?: Buffer;
+  /** Exact capture JSON to write as capture.json, produced in bounded parts. */
+  readonly persist?: {
+    readonly bytes: number;
+    readonly parts: () => Iterable<string>;
+  };
 }
 
 export interface PublishWebMirrorOptions {
+  readonly operation: Extract<
+    WebCaptureExportOperation,
+    "export_web_mirror" | "clone_website"
+  >;
   readonly resources: ArtifactResourceScope;
   readonly signal?: AbortSignal;
   readonly error: WebCaptureExportErrorFactory;
@@ -149,27 +162,38 @@ export const publishWebMirror = async (
   const { signal } = options;
   return publishOutputTree<WebMirrorExportResult>(
     {
+      operation: options.operation,
       outputDirectory,
       resources: options.resources,
       ...(signal === undefined ? {} : { signal }),
       error: options.error,
       partialObservation: (result) => ({ kind: "web-mirror-export", result }),
     },
-    async (tree) => {
-      if (captureFile.persist !== undefined)
-        await writeTreeFile(
-          tree,
+    async ({ tree, assertActive }) => {
+      const { persist } = captureFile;
+      if (persist !== undefined)
+        await tree.write(
           "capture.json",
-          captureFile.persist,
-          captureFile.sha256,
+          Readable.from(utf8Chunks(persist.parts())),
+          { sha256: captureFile.sha256, bytes: persist.bytes },
           signal,
         );
       // Exact files first: case-collision fallbacks fix final paths before
       // any view links to them.
-      const written = await writeExactFiles(tree, plan, signal);
-      const views = await writeViews(tree, capture, plan, written, signal);
+      const written = await writeExactFiles(tree, plan, assertActive, signal);
+      const views = await writeViews(
+        tree,
+        capture,
+        plan,
+        written,
+        assertActive,
+        signal,
+      );
       const records = resourceRecords(capture, plan, written, views);
-      const entry = entryRecord(capture, records);
+      const { entry, limitation: entryLimitation } = entryRecord(
+        capture,
+        records,
+      );
       if (entry !== null)
         await writeIndexPage(tree, entry.view_path ?? entry.file_path, signal);
       const manifest = webMirrorManifestSchema.parse({
@@ -187,12 +211,10 @@ export const publishWebMirror = async (
         entry,
         resources: records,
         coverage: coverage(plan, records, views),
-        limitations: mirrorLimitations(
-          capture,
-          plan,
-          written.texts,
-          entry !== null,
-        ),
+        limitations: [
+          ...mirrorLimitations(capture, plan, written.texts),
+          ...(entryLimitation === undefined ? [] : [entryLimitation]),
+        ],
       });
       const persisted = manifestBytes(manifest);
       return {
@@ -207,21 +229,26 @@ export const publishWebMirror = async (
   );
 };
 
+function* utf8Chunks(parts: Iterable<string>): Generator<Buffer> {
+  for (const part of parts) yield Buffer.from(part, "utf8");
+}
+
 const writeExactFiles = async (
   tree: SafeOutputTree,
   plan: MirrorPlan,
+  assertActive: () => void,
   signal: AbortSignal | undefined,
 ): Promise<WrittenFiles> => {
   const paths: string[] = [];
   const layouts: ExportedLayout[] = [];
   const texts = new Map<number, string>();
   for (const [index, file] of plan.files.entries()) {
-    signal?.throwIfAborted();
+    assertActive();
     const bytes = responseBodyBytes(file.body);
     const written = await writeExactFile(tree, file, bytes, signal);
     paths.push(written.path);
     layouts.push(written.layout);
-    if (viewKind(file) !== undefined) {
+    if (viewKind(file) !== undefined && URL.canParse(file.url)) {
       const text = viewText(file, bytes);
       if (text !== undefined) texts.set(index, text);
     }
@@ -234,6 +261,7 @@ const writeViews = async (
   capture: SelectedMirrorCapture,
   plan: MirrorPlan,
   written: WrittenFiles,
+  assertActive: () => void,
   signal: AbortSignal | undefined,
 ): Promise<Map<number, ViewRecord>> => {
   // Files of identical directories under files/ and view/ share one name
@@ -253,7 +281,7 @@ const writeViews = async (
   };
   const views = new Map<number, ViewRecord>();
   for (const [index, path] of viewPaths) {
-    signal?.throwIfAborted();
+    assertActive();
     const file = plan.files[index];
     const text = written.texts.get(index);
     if (file === undefined || text === undefined) continue;
@@ -359,7 +387,6 @@ const mirrorLimitations = (
   capture: SelectedMirrorCapture,
   plan: MirrorPlan,
   texts: ReadonlyMap<number, string>,
-  hasEntry: boolean,
 ): string[] => {
   const hasCaptured = capture.resources.some(
     ({ content }) => content.state === "captured",
@@ -374,15 +401,18 @@ const mirrorLimitations = (
       : []),
     ...LIMITATIONS,
     ...(plan.files.some(
-      (file, index) => viewKind(file) !== undefined && !texts.has(index),
+      (file, index) =>
+        viewKind(file) !== undefined &&
+        URL.canParse(file.url) &&
+        !texts.has(index),
     )
       ? [NO_VIEW_LIMITATION]
       : []),
-    ...(hasEntry
-      ? []
-      : [
-          "No captured HTML document matched the start navigation, so no entry page was generated.",
-        ]),
+    ...(plan.files.some(
+      (file) => viewKind(file) !== undefined && !URL.canParse(file.url),
+    )
+      ? [NO_URL_VIEW_LIMITATION]
+      : []),
     ...(hasCaptured
       ? []
       : [
@@ -442,7 +472,8 @@ const writeExactFile = async (
       layout: { layout: file.layout, layout_reason: file.layoutReason },
     };
   } catch (cause: unknown) {
-    const collision = destinationCollisionReason(cause);
+    const collision =
+      destinationCollisionReason(cause) ?? pathTooLongReason(cause);
     if (collision === undefined || file.layout !== "url-path") throw cause;
     await writeTreeFile(
       tree,
@@ -456,6 +487,18 @@ const writeExactFile = async (
       layout: { layout: "isolated", layout_reason: collision },
     };
   }
+};
+
+/** A destination that cannot hold the URL path's length isolates the file. */
+const pathTooLongReason = (cause: unknown): string | undefined => {
+  for (
+    let current: unknown = cause, depth = 0;
+    current instanceof Error && depth < 8;
+    current = current.cause, depth += 1
+  )
+    if ("code" in current && current.code === "ENAMETOOLONG")
+      return "The destination filesystem rejected the URL path as too long.";
+  return undefined;
 };
 
 /**
@@ -514,26 +557,58 @@ const rewriteView = (
   return { ...rewritten, text: `${bom}${rewritten.text}` };
 };
 
+const originOf = (value: string): string | null =>
+  URL.canParse(value) ? new URL(value).origin : null;
+
+/**
+ * The document the start navigation ended at. When no exported document has
+ * that exact URL (a client-side route change, or an uncaptured body), only a
+ * same-origin document requested during the start step is accepted, with a
+ * limitation naming it; a third-party frame never becomes the entry.
+ */
 const entryRecord = (
   capture: SelectedMirrorCapture,
   records: readonly WebMirrorResource[],
-): WebMirrorExportResult["entry"] => {
+): {
+  readonly entry: WebMirrorExportResult["entry"];
+  readonly limitation?: string;
+} => {
   const target = mirrorUrlKey(capture.entryUrl);
+  const origin = originOf(capture.entryUrl);
+  const { first, last } = capture.entrySequences;
   const documents = records.filter(
     (record) =>
       record.resource_type === "document" &&
       record.content.state === "exported",
   );
+  const exact = documents.find((record) => mirrorUrlKey(record.url) === target);
   const selected =
-    documents.find((record) => mirrorUrlKey(record.url) === target) ??
-    documents[0];
+    exact ??
+    documents.find(
+      ({ url, source }) =>
+        origin !== null &&
+        originOf(url) === origin &&
+        source.request_sequence >= first &&
+        source.request_sequence <= last,
+    );
   if (selected === undefined || selected.content.state !== "exported")
-    return null;
+    return {
+      entry: null,
+      limitation:
+        "No captured HTML document matched the start navigation, so no entry page was generated.",
+    };
   return {
-    url: selected.url,
-    file_path: selected.content.relative_path,
-    view_path: selected.view?.relative_path ?? null,
-    open_path: "index.html",
+    entry: {
+      url: selected.url,
+      file_path: selected.content.relative_path,
+      view_path: selected.view?.relative_path ?? null,
+      open_path: "index.html",
+    },
+    ...(exact === undefined
+      ? {
+          limitation: `The start navigation ended at ${capture.entryUrl}, which matches no captured document; the entry page is ${selected.url}, the first same-origin document requested during that navigation.`,
+        }
+      : {}),
   };
 };
 

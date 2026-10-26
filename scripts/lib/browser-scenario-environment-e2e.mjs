@@ -11,7 +11,7 @@ import { browserScenarioSchema } from "../../dist/domain/browserScenario.js";
 import { AnalysisCancelledError } from "../../dist/domain/analysisErrorCore.js";
 import { runScenarioCli } from "./browser-scenario-verifier.mjs";
 import { requireMcpEvidenceResult } from "./mcp-verifier-results.mjs";
-import { closeVerifierResources } from "./verifier-cleanup.mjs";
+import { withVerifierCleanup } from "./verifier-cleanup.mjs";
 
 const expected = {
   timezone: "Pacific/Honolulu",
@@ -140,8 +140,7 @@ export async function verifyScenarioEnvironment(endpoint, targetId, origin) {
     return JSON.parse(value.result.value);
   };
   const provider = createBrowserScenarioProvider(process.env);
-  let verificationError;
-  try {
+  return withVerifierCleanup(async () => {
     const baseline = await readEnvironment();
     const callerLanguage = await readEnvironment(languageExpression);
     const scenario = environmentScenario({
@@ -173,7 +172,7 @@ export async function verifyScenarioEnvironment(endpoint, targetId, origin) {
       name: "browser-environment-e2e",
       version: "1",
     });
-    try {
+    await withVerifierCleanup(async () => {
       await client.connect(transport);
       const definition = (await client.listTools()).tools.find(
         ({ name }) => name === "capture_browser_scenario",
@@ -197,10 +196,7 @@ export async function verifyScenarioEnvironment(endpoint, targetId, origin) {
         origin,
         assertRestored,
       });
-    } finally {
-      await client.close();
-      await transport.close();
-    }
+    }, [() => client.close(), () => transport.close()]);
     await assertRestored();
     const initializationFailure = await provider.captureScenario({
       ...scenario,
@@ -240,15 +236,7 @@ export async function verifyScenarioEnvironment(endpoint, targetId, origin) {
       cancellation_cleanup: true,
       external_target_preserved: true,
     };
-  } catch (cause) {
-    verificationError = cause;
-    throw cause;
-  } finally {
-    await closeVerifierResources(
-      [() => provider.close(), () => connection.close()],
-      verificationError,
-    );
-  }
+  }, [() => provider.close(), () => connection.close()]);
 }
 
 const verifyConcurrentMcpCapture = async ({

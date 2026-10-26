@@ -7,8 +7,8 @@ import type { BrowserScenarioCaptureLimits } from "../../domain/browserScenarioC
 import type {
   BrowserScenarioEventAdmission,
   BrowserScenarioEventBudgetReason,
+  BrowserScenarioEvent,
 } from "../../domain/browserScenarioCaptureValues.js";
-import type { BrowserScenarioEvent } from "../../domain/browserScenarioCaptureValues.js";
 import type { BrowserScenarioSecrets } from "../BrowserScenarioSecrets.js";
 import {
   captureNetworkBody,
@@ -26,7 +26,26 @@ export interface ScenarioNetworkRequest extends NetworkHeadersSource {
   postDataBuffer(): Buffer | null;
   redirectedFrom(): ScenarioNetworkRequest | null;
   failure(): { errorText: string } | null;
+  /** Browser resource timing: `startTime` in epoch milliseconds (0 until known), `responseEnd` after it (-1 when unknown). */
+  timing?(): { readonly startTime: number; readonly responseEnd: number };
 }
+
+/** The browser's own start and duration for a finished or failed request, as far as it reported them. */
+const browserTiming = (
+  request: ScenarioNetworkRequest,
+): { readonly started_at?: string; readonly elapsed_ms?: number } => {
+  const timing = request.timing?.();
+  if (timing === undefined) return {};
+  const { startTime, responseEnd } = timing;
+  return {
+    ...(Number.isFinite(startTime) && startTime > 0
+      ? { started_at: new Date(startTime).toISOString() }
+      : {}),
+    ...(Number.isFinite(responseEnd) && responseEnd >= 0
+      ? { elapsed_ms: responseEnd }
+      : {}),
+  };
+};
 
 /** A response's body becomes eligible for reading only after requestfinished. */
 export interface ScenarioNetworkResponse extends NetworkHeadersSource {
@@ -155,13 +174,20 @@ export class PlaywrightScenarioNetwork {
       return;
     }
     if (transaction.requestObserved) return;
-    if (!this.admitMetadata(transaction, "request", request)) return;
+    const observedAt = new Date().toISOString();
+    if (
+      !this.admitMetadata(transaction, "request", request, undefined, [
+        observedAt,
+      ])
+    )
+      return;
     transaction.requestObserved = true;
     const admission = this.options.emit({
       ...this.metadata(request, transaction),
       kind: "request",
       status: null,
       failure: null,
+      observed_at: observedAt,
     });
     if (admission.status === "omitted") {
       this.options.omitNetwork(transaction.id, "request", admission.reason);
@@ -208,7 +234,13 @@ export class PlaywrightScenarioNetwork {
     const transaction = this.transaction(request);
     if (transaction === undefined) {
       this.omitOmittedTransactionPhase(request, "response");
-      this.observeOmittedTransactionPhase(request, "response");
+      // Selection follows the observed response, independently of its eventual
+      // terminal state. No omitted response body is acquired.
+      if (
+        this.options.selection.response_body ||
+        this.options.selection.header_values
+      )
+        this.omitOmittedTransactionContent(request, "response");
       return;
     }
     if (
@@ -244,22 +276,26 @@ export class PlaywrightScenarioNetwork {
     const transaction = this.transaction(request);
     if (transaction === undefined) {
       this.omitOmittedTransactionPhase(request, "request-finished");
-      const observed = this.omittedPhases.get(request);
-      if (
-        observed?.has("response") &&
-        (this.options.selection.response_body ||
-          this.options.selection.header_values)
-      )
-        this.omitOmittedTransactionContent(request, "response");
       return;
     }
-    if (!this.admitMetadata(transaction, "request-finished", request)) return;
     transaction.terminal = "finished";
+    const timing = browserTiming(request);
+    if (
+      !this.admitMetadata(
+        transaction,
+        "request-finished",
+        request,
+        undefined,
+        timing.started_at === undefined ? [] : [timing.started_at],
+      )
+    )
+      return;
     const admission = this.options.emit({
       ...this.metadata(request, transaction),
       kind: "request-finished",
       status: null,
       failure: null,
+      ...timing,
     });
     if (admission.status === "omitted") {
       this.options.omitNetwork(
@@ -283,9 +319,11 @@ export class PlaywrightScenarioNetwork {
     }
     transaction.terminal = "failed";
     const failure = request.failure()?.errorText || "Unknown request failure";
+    const timing = browserTiming(request);
     if (
       !this.admitMetadata(transaction, "request-failed", request, undefined, [
         failure,
+        ...(timing.started_at === undefined ? [] : [timing.started_at]),
       ])
     )
       return;
@@ -295,6 +333,7 @@ export class PlaywrightScenarioNetwork {
       kind: "request-failed",
       status: null,
       failure: message,
+      ...timing,
     });
     if (admission.status === "omitted") {
       this.options.omitNetwork(

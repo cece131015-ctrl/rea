@@ -9,7 +9,7 @@ import type { RuntimeReconciliationEntity } from "./javascriptRuntimeReconciliat
 import {
   createStaticRuntimeScope,
   mappedRuntimePaths,
-  staticNodeWithinRuntimeScope,
+  staticNodeRuntimeScope,
 } from "./javascriptRuntimeStaticCandidates.js";
 
 export interface StaticLoadStateProjection {
@@ -70,7 +70,9 @@ const classifyLayer = (
     options.reconciliationComplete &&
     layer.graph.coverage.status === "complete" &&
     scopedEntities.length > 0 &&
-    scopedEntities.every(({ capture }) => capture.scriptsCompleteWithinScope);
+    scopedEntities.every(
+      ({ capture }) => capture.codeInventoryCompleteWithinScope,
+    );
   const states = nodes.map((node) => {
     const runtimeNodeIds = uniqueSorted(direct.get(node.node_id) ?? []);
     if (runtimeNodeIds.length > 0)
@@ -93,8 +95,8 @@ const classifyLayer = (
           ? "static-or-runtime-coverage-incomplete"
           : "ambiguous-runtime-candidate",
       });
-    const nodeWithinScope = staticNodeWithinRuntimeScope(node, runtimeScope);
-    if (layerComplete && nodeWithinScope)
+    const membership = staticNodeRuntimeScope(node, runtimeScope);
+    if (layerComplete && membership === "within")
       return state(layer, node, {
         status: "not-observed-in-capture",
         runtimeNodeIds: [],
@@ -103,9 +105,10 @@ const classifyLayer = (
     return state(layer, node, {
       status: "unknown",
       runtimeNodeIds: [],
-      reason: !nodeWithinScope
-        ? "layer-outside-runtime-scope"
-        : "static-or-runtime-coverage-incomplete",
+      reason:
+        membership === "outside"
+          ? "layer-outside-runtime-scope"
+          : "static-or-runtime-coverage-incomplete",
     });
   });
   return { states };

@@ -26,16 +26,38 @@ describe("rewriteHtml", () => {
     });
   });
 
-  it("resolves against base href and neutralizes it", () => {
-    const html = `<base href="https://site.test/img/"><img src="logo.png">`;
+  it("resolves against base href and points the base at the view file itself", () => {
+    const html = `<base href="https://site.test/img/"><img src="logo.png"><a href="#faq">f</a><a href="">e</a>`;
     expect(
       rewriteHtml(html, new URL("https://site.test/deep/page"), {
         fromPath,
         lookup,
       }).text,
     ).toBe(
-      `<base href="./"><img src="../../files/https_site.test_443/img/logo.png">`,
+      `<base href="index.html"><img src="../../files/https_site.test_443/img/logo.png"><a href="https://site.test/img/#faq">f</a><a href="https://site.test/img/">e</a>`,
     );
+  });
+
+  it("keeps in-page fragments when the base is the document itself", () => {
+    const html = `<base href="/"><a href="#faq">f</a><a href="">e</a><a href="app.css?v=2#x">c</a>`;
+    expect(rewriteHtml(html, documentUrl, { fromPath, lookup }).text).toBe(
+      `<base href="index.html"><a href="#faq">f</a><a href="">e</a><a href="app~q1.css#x">c</a>`,
+    );
+  });
+
+  it("takes the first non-template base with an href, even an empty one", () => {
+    const html = `<template><base href="https://other.test/"></template><base href=""><base href="https://other.test/"><img src="/img/logo.png">`;
+    expect(rewriteHtml(html, documentUrl, { fromPath, lookup }).text).toBe(
+      `<template><base href="https://other.test/"></template><base href="index.html"><base href="https://other.test/"><img src="../../files/https_site.test_443/img/logo.png">`,
+    );
+  });
+
+  it("rewrites a reference once when parse5 reconstructs an open formatting element", () => {
+    const html = `<p><a href="/img/logo.png">L<p>More</a>`;
+    expect(rewriteHtml(html, documentUrl, { fromPath, lookup })).toMatchObject({
+      text: `<p><a href="../../files/https_site.test_443/img/logo.png">L<p>More</a>`,
+      rewritten: 1,
+    });
   });
 
   it("rewrites srcset candidates, style attributes and style elements", () => {

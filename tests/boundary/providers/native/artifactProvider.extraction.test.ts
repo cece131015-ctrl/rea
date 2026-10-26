@@ -12,8 +12,44 @@ import {
   artifactInventoryResultSchema,
 } from "../../../../src/domain/artifactGraph.js";
 import type { BinaryTarget } from "../../../../src/domain/binaryTargetTypes.js";
+import { withArtifactClient } from "../../../support/artifactClientScope.js";
 
 describe("artifact extraction", () => {
+  it.skipIf(process.platform === "win32").each(["file/..", "missing"])(
+    "refuses an invalid parent (%s) before acquiring output and permits a corrected request",
+    async (parent) => {
+      const root = await createTestTempDirectory("rea-extract-invalid-parent-");
+      const source = join(root, "source");
+      await mkdir(source);
+      await writeFile(join(source, "payload.txt"), "selected payload\n");
+      await writeFile(join(root, "file"), "parent is a file");
+      const output = join(root, "out");
+
+      await withArtifactClient(target(source, "directory"), async (client) => {
+        const refused = await client.execute("extract_artifact", {
+          output_root: `${root}/${parent}/out`,
+        });
+        expect(refused).toMatchObject({
+          ok: false,
+          error: { _tag: "ArtifactOperationError", reason: "path" },
+        });
+        if (!refused.ok) expect(refused.error.cleanupIncomplete).toBe(false);
+        await expect(access(output)).rejects.toMatchObject({ code: "ENOENT" });
+
+        const corrected = await client.execute("extract_artifact", {
+          output_root: output,
+        });
+        if (!corrected.ok) throw corrected.error;
+        expect(
+          artifactExtractionResultSchema.parse(corrected.value.result),
+        ).toMatchObject({ output_root: output, containment_verified: true });
+        expect(await readFile(join(output, "payload.txt"), "utf8")).toBe(
+          "selected payload\n",
+        );
+      });
+    },
+  );
+
   it("keeps committed files after the owning client closes", async () => {
     const root = await createTestTempDirectory("rea-extract-client-close-");
     const source = join(root, "source");

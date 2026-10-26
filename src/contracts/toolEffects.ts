@@ -53,6 +53,8 @@ const sessionEvidence = effects({ mutatesSession: true });
 
 /** Explicit effect audit for every public tool. */
 export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
+  inspect_analysis_settings: effects(),
+  update_analysis_settings: effects({ mutatesSession: true }),
   list_cutter_sessions: effects({ accessesNetwork: true }),
   cutter_command: effects({
     mutatesTarget: true,
@@ -125,8 +127,15 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     executesForeignCode: true,
     idempotent: false,
   }),
+  inspect_desktop_application: evidence,
   inspect_go_binary: evidence,
+  inspect_il2cpp_metadata: evidence,
+  inspect_model_artifact: evidence,
+  inspect_gpu_code_objects: evidence,
   inspect_rust_binary: evidence,
+  inspect_apk_signature: evidence,
+  inspect_python_pyc: evidence,
+  inspect_erlang_beam: evidence,
   inspect_sqlite_database: effects({
     mutatesSession: true,
     writesFilesystem: true,
@@ -237,6 +246,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     mutatesSession: true,
     launchesProcess: true,
     accessesNetwork: true,
+    executesForeignCode: true,
     idempotent: false,
   }),
   instrument_with_frida: effects({
@@ -247,7 +257,16 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     executesForeignCode: true,
     idempotent: false,
   }),
+  inspect_byte_entropy: evidence,
   inspect_pe_resources: evidence,
+  inspect_pe_certificates: evidence,
+  inspect_pe_imports: evidence,
+  inspect_native_exports: evidence,
+  inspect_elf_notes: evidence,
+  inspect_apple_ips: evidence,
+  inspect_devicetree: evidence,
+  inspect_kernel_module: evidence,
+  inspect_pe_load_config: evidence,
   inspect_analysis_view: evidence,
   inspect_firmware_regions: effects({
     mutatesSession: true,
@@ -552,6 +571,11 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   get_objc_classes: evidence,
   get_objc_protocols: evidence,
   batch_decompile: evidence,
+  decompile_all: effects({
+    mutatesSession: true,
+    writesFilesystem: true,
+    idempotent: false,
+  }),
   get_call_graph: evidence,
   analyze_swift_types: evidence,
   find_xrefs_to_name: evidence,
@@ -587,7 +611,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     idempotent: false,
   }),
   inspect_macho: nativeEvidence,
-  inspect_signature: nativeEvidence,
+  inspect_signature: { ...nativeEvidence, writesFilesystem: true },
   inspect_plist: nativeEvidence,
   list_architectures: nativeEvidence,
   demangle_swift: nativeEvidence,
@@ -615,7 +639,11 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   project_managed_application_graph: sessionEvidence,
   list_browser_targets: browserEvidence,
   inspect_web_page: browserEvidence,
-  analyze_web_bundle: browserEvidence,
+  analyze_web_bundle: effects({
+    ...browserEvidence,
+    launchesProcess: true,
+    writesFilesystem: true,
+  }),
   observe_web_session: browserEvidence,
   discover_webmcp_tools: browserEvidence,
   compare_web_captures: sessionEvidence,
@@ -680,6 +708,10 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     writesFilesystem: true,
     idempotent: false,
   }),
+  export_environment_bundle: effects({
+    writesFilesystem: true,
+    idempotent: false,
+  }),
   reconcile_javascript_runtime: evidence,
   recover_javascript_sources: effects({
     mutatesSession: true,
@@ -698,6 +730,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   project_apple_application_graph: evidence,
   project_harmony_application_graph: evidence,
   open_binary: effects({ mutatesSession: true, launchesProcess: true }),
+  open_bundle_resources: effects({ mutatesSession: true }),
   close_binary: effects({
     mutatesSession: true,
     writesFilesystem: true,
@@ -725,6 +758,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   compare_artifacts: sessionEvidence,
   compare_wasm_interfaces: sessionEvidence,
   compare_functions: sessionEvidence,
+  match_native_functions: sessionEvidence,
   compare_bundles: effects({ mutatesSession: true }),
   find_changed_behavior: sessionEvidence,
   build_call_path: sessionEvidence,
@@ -773,6 +807,8 @@ export const annotationsFromEffects = (
  * client probes (version output and stderr excerpts) can.
  */
 export const TARGET_CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
+  "inspect_analysis_settings",
+  "update_analysis_settings",
   "export_evidence_bundle",
   "record_unknown",
 ]);

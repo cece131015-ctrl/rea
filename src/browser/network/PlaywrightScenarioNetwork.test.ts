@@ -7,7 +7,7 @@ import {
   type BrowserScenarioEvent,
 } from "../../domain/browserScenarioCaptureValues.js";
 import type { BrowserNetworkContentSelection } from "../../domain/browserNetworkEvidence.js";
-import { BrowserScenarioSecrets } from "../BrowserScenarioSecrets.js";
+import { resolveScenarioSecrets } from "../../../tests/fixtures/browserScenarioSecrets.js";
 import {
   PlaywrightScenarioNetwork,
   type ScenarioNetworkRequest,
@@ -112,10 +112,9 @@ const harness = (
     ],
     capture: { limits: limitsInput },
   });
-  const secrets = BrowserScenarioSecrets.resolve(scenario, {
+  const secrets = resolveScenarioSecrets(scenario, {
     FIXTURE_SECRET: secretValue,
   });
-  if (secrets === undefined) throw new Error("Fixture secret was not resolved");
   const events: BrowserScenarioEvent[] = [];
   const omittedEventCounts = new Map<string, number>();
   const collector = new PlaywrightScenarioNetwork({
@@ -170,6 +169,71 @@ const bodyText = (event: BrowserScenarioEvent) => {
 };
 
 afterEach(() => vi.useRealTimers());
+
+it("keeps observed completion independent of rejected completion metadata", async () => {
+  const { secrets, limits } = harness();
+  let omit = false;
+  const omitted: string[] = [];
+  const collector = new PlaywrightScenarioNetwork({
+    selection: {
+      request_body: false,
+      response_body: false,
+      header_values: false,
+    },
+    limits,
+    secrets,
+    admitText: () =>
+      omit
+        ? {
+            status: "omitted",
+            sequence: 1,
+            reason: "max-total-event-allocation-bytes",
+          }
+        : { status: "retained", sequence: 1 },
+    emit: () => ({ status: "retained", sequence: 1 }),
+    admitContentBody: () => ({ status: "retained", sequence: 1 }),
+    omitNetwork: (_id, kind) => {
+      omitted.push(kind);
+    },
+    omitEvent: (kind) => {
+      omitted.push(kind);
+    },
+  });
+  const request = new RequestFixture("ordinary");
+  collector.request(request);
+  omit = true;
+  collector.finished(request);
+  await collector.finish();
+  expect(omitted).toContain("request-finished");
+  expect(omitted).not.toContain("request-unfinished");
+});
+
+it.each(["finished", "failed", "unfinished"])(
+  "counts selected omitted response content when %s",
+  async (terminal) => {
+    const { collector, omittedEventCounts } = harness(
+      { request_body: false, response_body: true, header_values: false },
+      undefined,
+      "fixture",
+      { max_network_transactions: 1 },
+    );
+    collector.request(new RequestFixture("admitted"));
+    const request = new RequestFixture("omitted");
+    const response = new ResponseFixture(request, "response");
+    collector.request(request);
+    collector.response(response);
+    expect(omittedEventCounts.get("network-content")).toBe(1);
+    collector.response(response);
+    expect(omittedEventCounts.get("network-content")).toBe(1);
+    if (terminal === "finished") collector.finished(request);
+    if (terminal === "failed") collector.failed(request);
+    expect(omittedEventCounts.get("network-content")).toBe(1);
+    await collector.finish();
+    expect(omittedEventCounts.get("network-content")).toBe(1);
+    expect(response.bodyReads).toBe(0);
+    expect(request.bodyReads).toBe(0);
+  },
+);
 
 it("redacts declared secrets in browser-produced form and JSON encodings", async () => {
   for (const secret of ["私密", 'space " and \n']) {
@@ -337,13 +401,16 @@ it("preserves duplicate headers and binary bytes, redacting credentials and decl
   );
   if (content?.kind !== "network-content" || content.body.state !== "captured")
     throw new Error("Missing response");
-  expect(Buffer.from(content.body.content, "base64")).toEqual(
-    Buffer.concat([
-      Buffer.from([0xff, 0x00]),
-      Buffer.from("[REDACTED:declared]"),
-      Buffer.from([0xfe]),
-    ]),
-  );
+  expect(
+    Buffer.compare(
+      Buffer.from(content.body.content, "base64"),
+      Buffer.concat([
+        Buffer.from([0xff, 0x00]),
+        Buffer.from("[REDACTED:declared]"),
+        Buffer.from([0xfe]),
+      ]),
+    ),
+  ).toBe(0);
   expect(content.body.redacted).toBe(true);
   expect(content.headers).toEqual({
     state: "captured",
@@ -879,4 +946,51 @@ it("does not read content when phase metadata was omitted", async () => {
     "max-total-event-allocation-bytes",
   );
   expect(collector.limitations().join(" ")).toContain("incomplete");
+});
+
+it("stamps when each request was observed, and the browser's own start and duration once it ends", async () => {
+  vi.useFakeTimers({ now: Date.parse("2026-10-24T05:00:00.250Z") });
+  const { collector, events } = harness({
+    request_body: false,
+    response_body: false,
+    header_values: false,
+  });
+  class TimedRequest extends RequestFixture {
+    constructor(
+      marker: string,
+      readonly startTime: number,
+      readonly responseEnd: number,
+    ) {
+      super(marker);
+    }
+    timing() {
+      return { startTime: this.startTime, responseEnd: this.responseEnd };
+    }
+  }
+  const finished = new TimedRequest(
+    "timed",
+    Date.parse("2026-10-24T05:00:00.200Z"),
+    12.5,
+  );
+  const failed = new TimedRequest("untimed", 0, -1);
+  collector.request(finished);
+  collector.request(failed);
+  collector.finished(finished);
+  collector.failed(failed);
+  await collector.finish();
+  expect(events.filter(({ kind }) => kind === "request")).toEqual([
+    expect.objectContaining({ observed_at: "2026-10-24T05:00:00.250Z" }),
+    expect.objectContaining({ observed_at: "2026-10-24T05:00:00.250Z" }),
+  ]);
+  expect(events).toContainEqual(
+    expect.objectContaining({
+      kind: "request-finished",
+      started_at: "2026-10-24T05:00:00.200Z",
+      elapsed_ms: 12.5,
+    }),
+  );
+  const failure = events.find(({ kind }) => kind === "request-failed");
+  expect(failure).toBeDefined();
+  expect(failure).not.toHaveProperty("started_at");
+  expect(failure).not.toHaveProperty("elapsed_ms");
 });

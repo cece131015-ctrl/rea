@@ -5,6 +5,7 @@ import {
 } from "../unicodeCodePointOrder.js";
 import type { ApplicationNode } from "./javascriptApplicationGraphSchemas.js";
 import type { JsonValue } from "../jsonValue.js";
+import { applicationEndpointCorrespondence } from "./javascriptApplicationEndpointCorrespondence.js";
 
 /** One deterministic one-to-one match between two graph versions. */
 type ApplicationVersionPairMatch =
@@ -200,6 +201,18 @@ const contentDigestKey = (node: ApplicationNode): string | null =>
 
 const moduleSourceDigestKey = (node: ApplicationNode): string | null => {
   if (node.kind !== "javascript-module") return null;
+  // An export binding is identified within its whole application root, so its
+  // id changes with any sibling file. Its own file's bytes and exported name
+  // identify it across versions, as `source_sha256` does a source module.
+  if (
+    node.identity.strategy === "artifact-local-key" &&
+    node.identity.namespace === "module-export"
+  ) {
+    const name = uniqueStringProperty(node, "exported_name");
+    return name === null
+      ? null
+      : `module-export\0${node.identity.artifact_sha256}\0${name}`;
+  }
   const value = uniqueStringProperty(node, "source_sha256");
   return value === null ? null : `module-source\0${node.kind}\0${value}`;
 };
@@ -241,11 +254,8 @@ const semanticValue = (
   node: ApplicationNode,
   properties: Readonly<Record<string, JsonValue>>,
 ): string | null => {
-  if (node.kind === "endpoint") {
-    const kind = nonEmptyString(properties.endpoint_kind);
-    const value = exactString(properties.value);
-    return kind === null || value === null ? null : `${kind}\0${value}`;
-  }
+  if (node.kind === "endpoint")
+    return applicationEndpointCorrespondence(node).semanticKey;
   if (node.kind === "storage")
     return joined(
       properties.storage_kind,

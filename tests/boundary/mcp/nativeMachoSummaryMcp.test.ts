@@ -14,6 +14,8 @@ import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { mcpTest } from "../../support/mcp/mcpFixture.js";
 import { openProductionTarget } from "../../support/mcp/productionSession.js";
+import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
+import { advertisedMcpToolSchemas } from "../../fixtures/advertisedMcpTool.js";
 
 const evidenceOf = <Schema extends z.ZodType>(schema: Schema) =>
   z.object({
@@ -40,6 +42,105 @@ const pageSchema = z.object({
   item: z.array(z.unknown()),
   coverage: z.object({ next_offset: z.number().nullable() }),
 });
+
+mcpTest(
+  "pages ambiguous imports and exact exports under the advertised MCP schema",
+  async ({ mcp, onTestFinished }) => {
+    const empty = { items: [], total: 0, exhaustive: true, limitations: [] };
+    const imported = {
+      name: null,
+      runtime_name: null,
+      raw_name: "_value+0x4",
+      name_status: "ambiguous",
+      addend: null,
+      address: null,
+      weak: null,
+      reexport: null,
+      source: "libFixture",
+    };
+    const exported = {
+      name: "_value",
+      runtime_name: "value",
+      address: "0x1000",
+      weak: null,
+      reexport: null,
+      source: null,
+    };
+    const report = inspectMachoSchema.parse({
+      format: "mach-o",
+      selected_architecture: { name: "arm64", container_file_offset: 0 },
+      endian: "little",
+      word_size: 64,
+      file_type: "MH_DYLIB",
+      flags: [],
+      uuid: null,
+      entrypoints: empty,
+      architectures: empty,
+      build_metadata: empty,
+      load_commands: empty,
+      dependencies: empty,
+      imports: { ...empty, items: [imported], total: 1 },
+      exports: { ...empty, items: [exported], total: 1 },
+      segments: empty,
+      provenance: [],
+      limitations: [],
+    });
+    const source = createEvidence(
+      undefined,
+      { id: "fixture", name: "Fixture", version: "1" },
+      {
+        operation: "inspect_macho",
+        parameters: {},
+        result: report,
+      },
+    );
+    const session = createTestBinarySession(() => {
+      throw new Error("Imported views must not start a provider");
+    });
+    onTestFinished(async () => {
+      await session.close();
+    });
+    const client = await mcp.connect(
+      createServer(
+        { kind: "session", session },
+        {
+          environment: { ...process.env, REA_MCP_INPUT_SCHEMA_PROFILE: "full" },
+        },
+      ),
+    );
+    const schemas = await advertisedMcpToolSchemas(
+      client,
+      "inspect_analysis_view",
+    );
+    for (const [facet, expected] of [
+      ["imports", imported],
+      ["exports", exported],
+    ] as const) {
+      const request = {
+        source: { kind: "inline", evidence: source },
+        view: { kind: "macho", facet },
+      };
+      expect(
+        schemas.ajv.validate(schemas.inputSchema, request),
+        JSON.stringify(schemas.ajv.errors),
+      ).toBe(true);
+      const reply = await client.callTool({
+        name: "inspect_analysis_view",
+        arguments: request,
+      });
+      expect(reply.isError, JSON.stringify(reply.content)).not.toBe(true);
+      expect(
+        schemas.ajv.validate(schemas.outputSchema, reply.structuredContent),
+        JSON.stringify(schemas.ajv.errors),
+      ).toBe(true);
+      expect(
+        pageSchema.parse(
+          parseEvidence(reply.structuredContent).normalized_result,
+        ).item,
+      ).toEqual([expected]);
+    }
+  },
+);
 
 describe.skipIf(process.platform !== "darwin")(
   "Mach-O summary delivery through MCP",

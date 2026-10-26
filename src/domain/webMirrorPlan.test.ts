@@ -129,6 +129,25 @@ describe("planWebMirror", () => {
     );
   });
 
+  it("isolates names longer than common filesystems hold, including the query suffix", () => {
+    const long = "c".repeat(130);
+    const plan = planWebMirror([
+      resource(`https://site.test/assets/${long}.css?v=12345`, "text/css"),
+      resource(`https://site.test/${"b".repeat(300)}`, "text/plain"),
+      resource(`https://site.test/${long}.css`, "text/css"),
+    ]);
+    expect(
+      plan.files.map(({ layout, relativePath }) => [
+        layout,
+        relativePath.split("/").every((part) => part.length <= 143),
+      ]),
+    ).toEqual([
+      ["isolated", true],
+      ["isolated", true],
+      ["url-path", true],
+    ]);
+  });
+
   it("records redirect hops without counting them as missing content", () => {
     const hop = resource("https://site.test/old", null, null, { status: 301 });
     const final = resource("https://site.test/new", "text/html", "<p>", {

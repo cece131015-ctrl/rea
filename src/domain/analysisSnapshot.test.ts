@@ -73,6 +73,49 @@ const snapshotWithHistoricalEvidence = () => {
   };
 };
 
+describe("analysis snapshot entry admission", () => {
+  it("preserves provider entries without profiles and requires profiles on workflow entries", () => {
+    const { snapshot } = snapshotWithHistoricalEvidence();
+    const entry = snapshot.entries[0];
+    if (entry === undefined) throw new Error("Missing fixture query");
+    const providerSchema = analysisSnapshotSchema.shape.entries.element;
+    const workflowSchema =
+      analysisSnapshotSchema.shape.workflow_entries.element;
+    expect(providerSchema.parse(entry)).toEqual(entry);
+    expect(workflowSchema.safeParse(entry).success).toBe(false);
+    const workflow = {
+      ...entry,
+      execution: {
+        ...entry.execution,
+        analysis_profile: snapshot.binding.analysis_profile,
+      },
+    };
+    expect(workflowSchema.parse(workflow)).toEqual(workflow);
+    for (const schema of [providerSchema, workflowSchema]) {
+      expect(
+        schema.safeParse({
+          ...workflow,
+          execution: { ...workflow.execution, provider: undefined },
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      providerSchema.parse({
+        ...workflow,
+        unknown_entry: true,
+        execution: { ...workflow.execution, unknown_execution: true },
+      }),
+    ).toEqual(entry);
+    expect(
+      workflowSchema.parse({
+        ...workflow,
+        unknown_entry: true,
+        execution: { ...workflow.execution, unknown_execution: true },
+      }),
+    ).toEqual(workflow);
+  });
+});
+
 describe("analysis snapshot target identity", () => {
   it.each(RAW_ONLY_ARCHITECTURES)(
     "keeps %s confined to executable raw snapshots",
@@ -420,6 +463,51 @@ describe("analysis snapshot canonical ordering and scope", () => {
       }),
     ).toThrow(/another target/u);
   });
+});
+
+it("does not select arbitrary provenance when multiple authenticated records match one replay entry", () => {
+  const { current, snapshot } = snapshotWithHistoricalEvidence();
+  const source = snapshot.evidence_bundle.records.find(
+    (record) => record.operation === "unprofiled_query",
+  )!;
+  const alternative = createEvidence(
+    ANALYSIS_SNAPSHOT_TARGET,
+    ANALYSIS_SNAPSHOT_PROVIDER,
+    {
+      operation: current.operation,
+      parameters: current.parameters,
+      result: current.normalized_result,
+      analysisProfile: ANALYSIS_SNAPSHOT_PROFILE,
+      evidenceLinks: [source.evidence_id],
+    },
+  );
+  expect(alternative.evidence_id).not.toBe(current.evidence_id);
+  const ambiguous = parseAnalysisSnapshot({
+    ...snapshot,
+    evidence_bundle: createEvidenceBundle([
+      ...snapshot.evidence_bundle.records,
+      alternative,
+    ]),
+  });
+  expect(ambiguous.entries).toEqual(snapshot.entries);
+  const reversedInsertion = parseAnalysisSnapshot({
+    ...ambiguous,
+    evidence_bundle: createEvidenceBundle(
+      [...ambiguous.evidence_bundle.records].reverse(),
+    ),
+  });
+  expect(reversedInsertion).toEqual(ambiguous);
+  for (const candidate of [ambiguous, reversedInsertion])
+    expect(
+      snapshotEvidenceForQuery(candidate, {
+        target: ANALYSIS_SNAPSHOT_TARGET,
+        bindingProfile: ANALYSIS_SNAPSHOT_PROFILE,
+        operation: current.operation,
+        parameters: current.parameters,
+        provider: ANALYSIS_SNAPSHOT_PROVIDER,
+        evidenceProfile: ANALYSIS_SNAPSHOT_PROFILE,
+      }),
+    ).toBeUndefined();
 });
 
 describe("analysis snapshot Evidence binding", () => {

@@ -17,7 +17,7 @@ import {
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
 import { managedViewIdentityUnknowns } from "./managedArtifactView.js";
-import { parseAnalysisViewResult } from "./analysisViewParent.js";
+import { createAnalysisViewResultReader } from "./analysisViewParent.js";
 
 const member = managedMemberInspectionSchema.shape;
 
@@ -34,8 +34,8 @@ export const managedMembersViewRequestSchema = z.strictObject({
     "field_accesses",
     "user_strings",
   ]),
-  offset: z.number().int().nonnegative().default(0),
-  limit: z.number().int().positive().default(64),
+  offset: z.int().nonnegative().default(0),
+  limit: z.int().positive().default(64),
 });
 
 const rowsOf = <C extends string, S extends z.ZodArray>(
@@ -60,7 +60,7 @@ export const managedMembersViewPageSchema = z.discriminatedUnion("collection", [
 
 type ManagedMembersViewPage = z.infer<typeof managedMembersViewPageSchema>;
 
-const nullableCount = z.number().int().nonnegative().nullable();
+const nullableCount = z.int().nonnegative().nullable();
 
 /** Keep identity, selection and coverage; member collections remain retained. */
 export const managedMemberSummarySchema = z.strictObject({
@@ -68,9 +68,11 @@ export const managedMemberSummarySchema = z.strictObject({
   nesting_read: member.nesting_read,
   artifact: member.artifact,
   module: member.module,
+  assembly: member.assembly,
   metadata: member.metadata,
   identity_scope: member.identity_scope,
   selection: member.selection.unwrap(),
+  method_rows: member.method_rows,
   coverage: member.coverage,
   user_strings: z
     .strictObject({
@@ -80,13 +82,13 @@ export const managedMemberSummarySchema = z.strictObject({
     .nullable(),
   limitations: member.limitations,
   reported_counts: z.strictObject({
-    types: z.number().int().nonnegative(),
+    types: z.int().nonnegative(),
     exported_types: nullableCount,
-    fields: z.number().int().nonnegative(),
-    methods: z.number().int().nonnegative(),
-    member_refs: z.number().int().nonnegative(),
-    call_edges: z.number().int().nonnegative(),
-    field_accesses: z.number().int().nonnegative(),
+    fields: z.int().nonnegative(),
+    methods: z.int().nonnegative(),
+    member_refs: z.int().nonnegative(),
+    call_edges: z.int().nonnegative(),
+    field_accesses: z.int().nonnegative(),
     user_strings: nullableCount,
   }),
 });
@@ -96,6 +98,7 @@ export const managedMembersViewContextSchema = z.strictObject({
   nesting_read: member.nesting_read,
   identity_scope: member.identity_scope,
   selection: member.selection.unwrap(),
+  method_rows: member.method_rows,
   source_metadata_status: member.metadata.shape.status,
   source_coverage: member.coverage,
 });
@@ -143,32 +146,10 @@ const collectionPage = (
   }
 };
 
-// A sealed parent result cannot change, so its validated report stays exact for
-// every later page. The weak reference lets memory pressure reclaim the copy;
-// unsealed input is validated on each call.
-const validatedReports = new WeakMap<
-  object,
-  WeakRef<ManagedMemberInspection>
->();
-
-/** Validate the parent once per sealed result instead of once per page. */
-const parseMemberReport = (
-  parent: AnalysisViewParent,
-): Result<ManagedMemberInspection, AnalysisError> => {
-  const { normalizedResult } = parent;
-  const sealed =
-    parent.sealedResult === true &&
-    typeof normalizedResult === "object" &&
-    normalizedResult !== null;
-  const cached = sealed
-    ? validatedReports.get(normalizedResult)?.deref()
-    : undefined;
-  if (cached !== undefined) return ok(cached);
-  const parsed = parseAnalysisViewResult(managedMemberInspectionSchema, parent);
-  if (parsed.ok && sealed)
-    validatedReports.set(normalizedResult, new WeakRef(parsed.value));
-  return parsed;
-};
+/** The shared owner proves immutable source identity before retaining normalized facts. */
+const parseMemberReport = createAnalysisViewResultReader(
+  managedMemberInspectionSchema,
+);
 
 /** Everything but the member collections, which are replaced by their counts. */
 const summarizeMembers = (
@@ -277,6 +258,7 @@ export const projectManagedMemberView = (
     nesting_read: report.nesting_read,
     identity_scope: report.identity_scope,
     selection: report.selection,
+    method_rows: report.method_rows,
     source_metadata_status: report.metadata.status,
     source_coverage:
       view.collection === "user_strings" && report.user_strings !== null

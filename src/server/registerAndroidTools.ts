@@ -3,7 +3,6 @@ import type { EvidenceWriter } from "../application/investigation/InvestigationR
 import { AndroidAnalysisService } from "../application/android/AndroidAnalysisService.js";
 import { inspectAndroidPackage } from "../application/android/AndroidPackageInspection.js";
 import type { EvidenceLookup } from "../application/EvidenceInputResolver.js";
-import { summarizeRetainedAndroidSearch } from "../application/android/AndroidSearchEvidenceSummary.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import type { Logger } from "pino";
 import {
@@ -25,23 +24,6 @@ export const registerAndroidTools = (
   const handler = createContractToolHandler(
     server,
     service,
-    logger,
-    recordEvidence,
-    withAdmittedAnalysis,
-  );
-  // Focused class searches keep complete raw inventory in the retained
-  // record and deliver a bounded summary inline; the generic handler then
-  // records and delivers the summary as the search contract's Evidence.
-  const searchService: ContractToolService<"search_android_classes"> = {
-    execute: async (operation, input, options) => {
-      const executed = await service.execute(operation, input, options);
-      if (!executed.ok) return executed;
-      return summarizeRetainedAndroidSearch(executed.value, recordEvidence);
-    },
-  };
-  const searchHandler = createContractToolHandler(
-    server,
-    searchService,
     logger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -72,7 +54,7 @@ export const registerAndroidTools = (
   server.registerTool(
     searchContract.name,
     toolRegistrationOptions(searchContract),
-    searchHandler(searchContract),
+    handler(searchContract),
   );
   const classContract = toolContract("inspect_android_class");
   server.registerTool(

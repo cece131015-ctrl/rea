@@ -13,6 +13,21 @@ it.each([
   ["integer", "00a1011bffffffffffffffff000b", "decoded"],
   ["BOM text", "00a1617864efbbbf610008", "decoded"],
   ["nested value", "00a1617881000005", "partial"],
+  [
+    "distinct nested byte keys",
+    "00a264736f6c634300081e6178a24101014102020013",
+    "partial",
+  ],
+  [
+    "duplicate nested byte keys",
+    "00a264736f6c634300081e6178a24101014101020013",
+    "not-decoded",
+  ],
+  [
+    "duplicate nested text keys",
+    "00a264736f6c634300081e6178a26161016161020013",
+    "not-decoded",
+  ],
   ["unavailable trailer", "00", "unavailable"],
   ["unsupported tag", "00a16178c0000005", "not-decoded"],
   ["floating point", "00a16178fa3f8000000008", "not-decoded"],
@@ -71,6 +86,18 @@ it.each([
         kind: "uninterpreted",
         container: "array",
       });
+    if (kind === "distinct nested byte keys") {
+      expect(metadata.compiler_version?.value).toBe("0.8.30");
+      expect(metadata.bytecode_offset).toBe(1);
+      expect(metadata.cbor_bytes).toBe(19);
+    }
+    if (kind.startsWith("duplicate nested")) {
+      expect(metadata.entries).toEqual([]);
+      expect(metadata.compiler_version).toBeNull();
+      expect(metadata.diagnostic).toContain("repeat map key");
+      expect(metadata.bytecode_offset).toBe(1);
+      expect(metadata.cbor_bytes).toBe(19);
+    }
     if (kind === "unavailable trailer") {
       expect(metadata.bytecode_offset).toBeNull();
       expect(metadata.entries).toEqual([]);

@@ -1,3 +1,5 @@
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
+import { err, ok, type Result } from "../domain/result.js";
 import { createHash } from "node:crypto";
 
 import type { BrowserScenario } from "../domain/browserScenario.js";
@@ -12,6 +14,9 @@ import {
 import type { BrowserStorageValueFingerprint } from "../domain/browserScenarioCaptureValues.js";
 
 const REDACTION_PREFIX = "[REDACTED:";
+
+/** Page values shorter than this are not redacted: redacting them would rewrite ids, ports and hosts throughout the capture. */
+export const MIN_REDACTED_PAGE_VALUE_LENGTH = 8;
 
 const encodedSecretValues = (secret: string): ReadonlySet<string> =>
   new Set([
@@ -225,14 +230,19 @@ const secretNeedles = (
 
 /** Resolved secret values kept only for one in-memory scenario session. */
 export class BrowserScenarioSecrets {
-  private readonly urlPatterns: readonly SecretPattern[];
-  private readonly textPatterns: readonly SecretPattern[];
-  private readonly urlReplacements: readonly SecretReplacement[];
-  private readonly textReplacements: readonly SecretReplacement[];
-  private readonly textNeedles: readonly SecretNeedle[];
-  private readonly redactionCostPerCharacter: number;
+  private urlPatterns: readonly SecretPattern[] = [];
+  private textPatterns: readonly SecretPattern[] = [];
+  private urlReplacements: readonly SecretReplacement[] = [];
+  private textReplacements: readonly SecretReplacement[] = [];
+  private textNeedles: readonly SecretNeedle[] = [];
+  private redactionCostPerCharacter = 8;
 
-  private constructor(private readonly values: ReadonlyMap<string, string>) {
+  private constructor(private readonly values: Map<string, string>) {
+    this.compile();
+  }
+
+  private compile(): void {
+    const values = this.values;
     this.urlPatterns = declaredPatterns(values, "url");
     this.textPatterns = declaredPatterns(values, "text");
     this.urlReplacements = secretReplacements(values, "url");
@@ -253,21 +263,59 @@ export class BrowserScenarioSecrets {
         );
   }
 
+  /**
+   * Redact a value a request step read from the page, such as a CSRF cookie
+   * or a stored bearer token, from everything recorded after it, as a
+   * declared secret is. The label names it in redaction markers; a value
+   * already redacted keeps its first marker, and a value shorter than
+   * {@link MIN_REDACTED_PAGE_VALUE_LENGTH} is not redacted.
+   */
+  admitPageValue(label: string, value: string): void {
+    // fetch sends a header value without surrounding spaces and tabs, so that is the spelling records hold.
+    const sent = value.replace(/^[\t ]+|[\t ]+$/gu, "");
+    if (sent !== value) this.admitPageValue(label, sent);
+    if (value.length < MIN_REDACTED_PAGE_VALUE_LENGTH) return;
+    for (const held of this.values.values()) if (held === value) return;
+    let id = `page:${label}`;
+    for (let suffix = 2; this.values.has(id); suffix += 1)
+      id = `page:${label}~${String(suffix)}`;
+    this.values.set(id, value);
+    this.compile();
+  }
+
   static resolve(
     scenario: BrowserScenario,
     environment: Readonly<Record<string, string | undefined>>,
-  ): BrowserScenarioSecrets | undefined {
+  ): Result<BrowserScenarioSecrets, AnalysisInputError> {
     const values = new Map<string, string>();
-    for (const declaration of scenario.secrets) {
+    for (const [index, declaration] of scenario.secrets.entries()) {
       const value = environment[declaration.environment_variable];
       if (
         !Object.hasOwn(environment, declaration.environment_variable) ||
         typeof value !== "string"
       )
-        return undefined;
+        return err(
+          new AnalysisInputError(
+            "capture_browser_scenario",
+            {
+              userMessage: `Set environment variable ${declaration.environment_variable} for browser scenario secret ${declaration.secret_id} in the environment that starts REA, then retry.`,
+            },
+            [
+              {
+                path: ["secrets", index, "environment_variable"],
+                reason: "missing_argument",
+                message: `Environment variable ${declaration.environment_variable} is not set for declared secret ${declaration.secret_id}.`,
+                expected: {
+                  secret_id: declaration.secret_id,
+                  environment_variable: declaration.environment_variable,
+                },
+              },
+            ],
+          ),
+        );
       values.set(declaration.secret_id, value);
     }
-    return new BrowserScenarioSecrets(values);
+    return ok(new BrowserScenarioSecrets(values));
   }
 
   value(source: BrowserScenarioValue): string {
@@ -396,9 +444,11 @@ export class BrowserScenarioSecrets {
       containsSecretPattern(value, normalizePercentEscapes(value), patterns)
     )
       return { value_state: "redacted-secret", value_sha256: null };
-    return {
-      value_state: "hashed",
-      value_sha256: createHash("sha256").update(value).digest("hex"),
-    };
+    const hash = createHash("sha256");
+    // In Unicode mode this class matches unpaired units, not valid pairs.
+    if (!/[\uD800-\uDFFF]/u.test(value)) hash.update(value);
+    // 0xff cannot occur in UTF-8, keeping the two preimage domains disjoint.
+    else hash.update(Buffer.from([0xff])).update(value, "utf16le");
+    return { value_state: "hashed", value_sha256: hash.digest("hex") };
   }
 }

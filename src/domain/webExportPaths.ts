@@ -5,14 +5,18 @@ export const sha256Text = (text: string): string =>
   createHash("sha256").update(text).digest("hex");
 
 const PORTABLE_SEGMENT = /^[A-Za-z0-9_~.-]+$/u;
+// The smallest common name limit: eCryptfs-encrypted names hold 143 bytes,
+// while ext4, APFS and NTFS hold 255. Portable segments are ASCII.
+const MAX_PORTABLE_SEGMENT_LENGTH = 143;
 const RESERVED_SEGMENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
 /**
  * One path segment every supported destination filesystem stores verbatim:
- * portable characters only, no dot segments, no trailing dot and no Windows
- * device name.
+ * portable characters only, a name every common filesystem can hold, no dot
+ * segments, no trailing dot and no Windows device name.
  */
 export const isPortablePathSegment = (segment: string): boolean =>
+  segment.length <= MAX_PORTABLE_SEGMENT_LENGTH &&
   PORTABLE_SEGMENT.test(segment) &&
   segment !== "." &&
   segment !== ".." &&

@@ -1,18 +1,22 @@
 import { z } from "zod";
 import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
-import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
+import {
+  jsonObjectSchema,
+  jsonValueSchema,
+  type JsonValue,
+} from "../domain/jsonValue.js";
 import { digestSchema } from "../domain/digests.js";
 import { uniqueSorted } from "../domain/canonicalOrdering.js";
 import { firmwareLogicalPath } from "./FirmwareFiles.js";
 
-const integer = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+const integer = z.int().min(0).max(Number.MAX_SAFE_INTEGER);
 const signature = z.object({
   id: z.string().min(1),
   offset: integer,
   size: integer,
   name: z.string(),
   description: z.string(),
-  confidence: z.number().int().min(0).max(255),
+  confidence: z.int().min(0).max(255),
   always_display: z.boolean(),
   extraction_declined: z.boolean(),
 });
@@ -21,11 +25,20 @@ const scan = z.array(
     Analysis: z.object({
       file_path: z.string(),
       file_map: z.array(signature),
-      extractions: z.record(z.string(), jsonValueSchema),
+      extractions: jsonObjectSchema,
     }),
   }),
 );
-const report = z.object({ __typename__: z.string() }).catchall(jsonValueSchema);
+const report = jsonObjectSchema.pipe(
+  z.custom<Record<string, JsonValue> & { __typename__: string }>(
+    (value) =>
+      typeof value === "object" &&
+      value !== null &&
+      "__typename__" in value &&
+      typeof value.__typename__ === "string",
+    "Expected report __typename__ string",
+  ),
+);
 const task = z.object({
   path: z.string(),
   depth: integer,
@@ -61,6 +74,25 @@ const missingDependency = z.object({
   __typename__: z.literal("ExtractorDependencyNotFoundReport"),
   dependencies: z.array(z.string()),
 });
+// Unblob reports resolved extraction problems and warnings alongside errors.
+// The declared severity owns failure; a diagnostic's presence or class name
+// alone does not establish that extraction failed.
+const extractionError = z.object({ severity: z.literal("ERROR") });
+type ExtractionFailureKind =
+  | "missing-extractor-dependency"
+  | "extractor-failure";
+const extractionFailureKinds = (
+  reports: readonly unknown[],
+): ExtractionFailureKind[] => {
+  const kinds = new Set<ExtractionFailureKind>();
+  for (const item of reports) {
+    if (missingDependency.safeParse(item).success)
+      kinds.add("missing-extractor-dependency");
+    else if (extractionError.safeParse(item).success)
+      kinds.add("extractor-failure");
+  }
+  return [...kinds];
+};
 const region = z.object({
   id: z.string(),
   start_offset: integer,
@@ -234,7 +266,7 @@ export const normalizeUnblobReport = (
     handler: string | null;
     encrypted: boolean | null;
     root_file_range: { offset: number; length: number } | null;
-    extraction_failed: boolean;
+    extraction_failure_kinds: ExtractionFailureKind[];
   }[] = [];
   const seen = new Set<string>();
   const taskFailures = new Set<string>();
@@ -359,7 +391,7 @@ export const normalizeUnblobReport = (
         );
       noteMissingDependencies(path, [item]);
       if (
-        item.__typename__ === "ExtractorExecutionErrorReport" &&
+        extractionFailureKinds([item]).includes("extractor-failure") &&
         !taskFailures.has(path)
       ) {
         taskFailures.add(path);
@@ -395,8 +427,9 @@ export const normalizeUnblobReport = (
                 })
                 .parse(item)
             : null;
-        const extractionFailed =
-          detail !== null && detail.extraction_reports.length > 0;
+        const failures = extractionFailureKinds(
+          detail?.extraction_reports ?? [],
+        );
         if (detail !== null)
           for (const problem of detail.extraction_reports) {
             diagnostics.push(
@@ -419,7 +452,7 @@ export const normalizeUnblobReport = (
           range: { offset: parsed.start_offset, length: parsed.size },
           handler: detail?.handler_name ?? null,
           encrypted: detail?.is_encrypted ?? null,
-          extraction_failed: extractionFailed,
+          extraction_failure_kinds: failures,
           root_file_range:
             path === "$input"
               ? {
@@ -446,23 +479,26 @@ export const normalizeUnblobReport = (
           // The report owns its failure and dependencies. A produced subtask
           // is a derivation, not a new owner for the parent's report.
           const dependencies = dependencyNames(parsed.extraction_reports);
-          const rows =
-            dependencies === null
-              ? [{ dependencies: [] as readonly string[] }]
-              : dependencyRows(dependencies);
+          const rows = [
+            ...(dependencies === null
+              ? []
+              : dependencyRows(dependencies).map((row) => ({
+                  ...row,
+                  kind: "missing-extractor-dependency" as const,
+                }))),
+            ...(extractionFailureKinds(parsed.extraction_reports).includes(
+              "extractor-failure",
+            )
+              ? [{ dependencies: [], kind: "extractor-failure" as const }]
+              : []),
+          ];
           for (const row of rows)
             failedExtractionStages.push({
               input_path: path,
               provider_id: parsed.id,
               handler: parsed.handler_name,
-              dependencies:
-                dependencies === null
-                  ? []
-                  : uniqueSorted([...row.dependencies]),
-              kind:
-                dependencies === null
-                  ? "extractor-failure"
-                  : "missing-extractor-dependency",
+              dependencies: row.dependencies,
+              kind: row.kind,
             });
         }
       }
@@ -523,10 +559,33 @@ export const normalizeUnblobReport = (
       "extract_firmware",
       "Report contains tasks disconnected from the selected input",
     );
+  // A producer can emit no UnknownChunkReport for an opaque file. Compute
+  // examined byte coverage from reported intervals rather than from empty errors.
+  const unclassifiedRanges: {
+    input_path: string;
+    range: { offset: number; length: number };
+    root_file_range: { offset: number; length: number };
+  }[] = [];
+  let coveredEnd = 0;
+  const gap = (offset: number, length: number) =>
+    unclassifiedRanges.push({
+      input_path: "$input",
+      range: { offset, length },
+      root_file_range: { offset: context.offset + offset, length },
+    });
+  for (const chunk of chunks
+    .filter((chunk) => chunk.input_path === "$input")
+    .sort((left, right) => left.range.offset - right.range.offset)) {
+    if (chunk.range.offset > coveredEnd)
+      gap(coveredEnd, chunk.range.offset - coveredEnd);
+    coveredEnd = Math.max(coveredEnd, chunk.range.offset + chunk.range.length);
+  }
+  if (coveredEnd < context.length) gap(coveredEnd, context.length - coveredEnd);
   return {
     files,
     sizes,
     chunks,
+    unclassified_ranges: unclassifiedRanges,
     derivations,
     depth_limited_paths: depths.sort(),
     failed_extraction_stages: failedExtractionStages.sort((left, right) =>
@@ -572,6 +631,7 @@ export const normalizeUnblobReport = (
             : 0,
       ),
     coverage:
+      unclassifiedRanges.length > 0 ||
       depths.length > 0 ||
       diagnostics.length > 0 ||
       chunks.some((c) => c.handler === null || c.encrypted === true)

@@ -29,9 +29,7 @@ const event = {
   time: 1791819895000.25,
   data: {
     header: { packet_type: "1RTT", packet_number: 5 },
-    frames: [
-      { frame_type: "stream", stream_id: 0, offset: 10, length: 5, fin: true },
-    ],
+    frames: [{ frame_type: "stream", stream_id: 0, offset: 10, length: 5 }],
   },
 };
 const qlog = (events: unknown[]) =>
@@ -60,7 +58,7 @@ const assertAdditionalQlogFacets = async (
       { kind: "qlog", facet: "loss-declarations", trace_index: 0 },
       [{ record_ordinal: 1, packet_number: { state: "reported", value: "5" } }],
     ],
-    [{ kind: "qlog", facet: "incomplete-records", trace_index: 0 }, []],
+    [{ kind: "qlog", facet: "incomplete-records", trace_index: 0 }, [0]],
     [
       {
         kind: "qlog",
@@ -79,7 +77,7 @@ const assertAdditionalQlogFacets = async (
         stream_id: "0",
         direction: "sent",
       },
-      ["15"],
+      [],
     ],
     [{ kind: "qlog", facet: "traces", offset: 99 }, []],
   ] as const) {
@@ -206,7 +204,15 @@ it("pages original trace-scoped facts after source deletion without conflating s
   );
   expect(contribution.normalized_result).toMatchObject({
     page: {
-      items: [{ record_ordinal: 0, frame_index: 0, offset: "10", length: "5" }],
+      items: [
+        {
+          record_ordinal: 0,
+          frame_index: 0,
+          offset: "10",
+          length: "5",
+          fin: null,
+        },
+      ],
     },
     coverage: { total: 1, exhausted: true },
   });
@@ -301,14 +307,20 @@ it("runs built CLI and real stdio SDK with exact evidence parity, selection, ret
     unique_bytes: "5",
     covered_ranges: [{ start: "10", end: "15" }],
   });
-  const retained = await call("inspect_analysis_view", {
-    source: { kind: "retained-evidence", evidence_id: mcp.evidence_id },
-    view: { kind: "api-surface" },
-  });
   // An unsupported view over an existing retained parent proves lookup without pretending qlog is HAR.
-  expect(parseMcpToolError(retained)).toMatchObject({
-    error: { code: "unsupported_target" },
-  });
+  for (const kind of [
+    "api-surface",
+    "environment-manifest",
+    "environment-state",
+  ] as const) {
+    const retained = await call("inspect_analysis_view", {
+      source: { kind: "retained-evidence", evidence_id: mcp.evidence_id },
+      view: { kind },
+    });
+    expect(parseMcpToolError(retained)).toMatchObject({
+      error: { code: "unsupported_target" },
+    });
+  }
   await client.ping();
   for (const record_ordinals of [[2], [0, 0]]) {
     expect(

@@ -110,10 +110,13 @@ const workspaceTrusted = async (
   return ok(trusted);
 };
 
-/** Check effective Gemini scopes while preserving their authority and source identity. */
+/**
+ * Check Gemini scopes using the caller's user-file observation (undefined means absent).
+ * Other settings sources are read here; transaction owners supply fresh user facts.
+ */
 export const readClientPolicyBlock = async (
   client: SetupClient,
-  userDocument?: ClientConfigurationDocument,
+  userDocument: ClientConfigurationDocument | undefined,
   desiredRegistration?: unknown,
   resources?: ArtifactResourceScope,
 ): Promise<Result<string | undefined, ClientConfigurationFileError>> => {
@@ -128,7 +131,7 @@ export const readClientPolicyBlock = async (
     settings.systemPath,
   ]) {
     const parsed =
-      path === client.configPath && userDocument !== undefined
+      path === client.configPath
         ? ok(userDocument)
         : await readConfigurationFile(path, "json", resources);
     if (!parsed.ok) return parsed;

@@ -12,7 +12,10 @@ import { parseEvidence } from "../../../src/domain/evidence.js";
 import { ok } from "../../../src/domain/result.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
-import { expandToolAvailability } from "../../../src/contracts/toolOutputSchemaPrimitives.js";
+import {
+  expandToolAvailability,
+  toolAvailabilityInventory,
+} from "../../../src/contracts/toolOutputSchemaPrimitives.js";
 
 import { JebProvider } from "../../../src/jeb/JebProvider.js";
 import {
@@ -60,14 +63,14 @@ it("discovers current JEB operation support and recovery through binary_session"
   const read = async () => {
     const result = await client.callTool({
       name: "binary_session",
-      arguments: {},
+      arguments: { detail: "complete" },
     });
     const status = toolContract("binary_session").outputSchema.parse(
       result.structuredContent,
     ).result;
-    return expandToolAvailability(status.tool_availability).filter(
-      (tool) => tool.surface === "jeb-provider",
-    );
+    return expandToolAvailability(
+      toolAvailabilityInventory.parse(status.tool_availability),
+    ).filter((tool) => tool.surface === "jeb-provider");
   };
   const unavailable = await read();
   expect(unavailable).toHaveLength(4);

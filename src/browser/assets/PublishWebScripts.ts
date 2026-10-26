@@ -63,6 +63,7 @@ export const publishWebScripts = async (
       : [];
   return publishOutputTree<WebScriptExportResult>(
     {
+      operation: "export_web_scripts",
       outputDirectory: input.output_directory,
       resources: options.resources,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -70,10 +71,10 @@ export const publishWebScripts = async (
         new WebScriptExportError(reason, target, diagnostic, errorOptions),
       partialObservation: (result) => ({ kind: "web-script-export", result }),
     },
-    async (tree) => {
+    async ({ tree, assertActive }) => {
       const records: ExportedWebScript[] = [];
       for (const [index, item] of planned.entries()) {
-        options.signal?.throwIfAborted();
+        assertActive();
         records.push(
           await publishPlannedScript(tree, item, index, options.signal),
         );

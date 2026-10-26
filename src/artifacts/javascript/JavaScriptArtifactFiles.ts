@@ -1,3 +1,4 @@
+import type { AsarHeaderAdmission } from "../../config/asarHeaderAdmission.js";
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import type { Readable } from "node:stream";
@@ -52,6 +53,7 @@ interface ReadContext {
   readonly files: JavaScriptArtifactFile[];
   readonly containers: JavaScriptArtifactContainer[];
   readonly signal: AbortSignal | undefined;
+  readonly asarHeaderAdmission: AsarHeaderAdmission | undefined;
   readonly selectedPaths: ReadonlyMap<string, number> | undefined;
   textBytes: number;
   invalidUtf8: number;
@@ -70,6 +72,7 @@ export const readJavaScriptArtifactFiles = async (
   resources: ArtifactResourceScope,
   signal?: AbortSignal,
   sourcePaths?: readonly string[],
+  asarHeaderAdmission?: AsarHeaderAdmission,
 ): Promise<JavaScriptArtifactFileSet> => {
   const inventory = expectedInventory(snapshot);
   const expected = inventory.files;
@@ -77,6 +80,23 @@ export const readJavaScriptArtifactFiles = async (
     sourcePaths === undefined
       ? undefined
       : new Map([...new Set(sourcePaths)].map((path, index) => [path, index]));
+  const undiscoveredPath = sourcePaths?.find(
+    (path) =>
+      relevantKind(path) !== undefined &&
+      !expected.has(path) &&
+      !inventory.unavailableFiles.has(path) &&
+      snapshot.occurrences[
+        lowerBound(snapshot.occurrences, path, (entry) => entry.logical_path)
+      ]?.logical_path !== path,
+  );
+  if (undiscoveredPath !== undefined && snapshot.coverage.status === "unknown")
+    throw new ArtifactReaderFailure(
+      "unavailable",
+      `Selected source discovery is unavailable under incomplete artifact traversal: ${undiscoveredPath}`,
+      {
+        partialObservation: { kind: "artifact-inventory", inventory: snapshot },
+      },
+    );
   const issues = (sourcePaths ?? []).flatMap((path, index) =>
     expected.has(path) || inventory.unavailableFiles.has(path)
       ? []
@@ -129,6 +149,7 @@ export const readJavaScriptArtifactFiles = async (
     files: [],
     containers: [],
     signal,
+    asarHeaderAdmission,
     selectedPaths,
     textBytes: 0,
     invalidUtf8: 0,
@@ -225,11 +246,7 @@ const visitReader = async (
             `Nested ASAR was not present in inventory: ${path}`,
           );
         if (container.hash_status === "mismatched") continue;
-        if (container.hash_status === "unavailable")
-          throw new ArtifactReaderFailure(
-            "unavailable",
-            `Nested ASAR bytes were unavailable during inventory: ${path}`,
-          );
+        if (container.hash_status === "unavailable") continue;
         if (container.hash_status !== "verified")
           throw new ArtifactReaderFailure(
             "integrity",
@@ -250,7 +267,12 @@ const visitReader = async (
           context.signal,
         );
         context.containers.push(inventory);
-        const nested = new AsarArtifactReader(entry.adapterKey);
+        const nested = new AsarArtifactReader(
+          entry.adapterKey,
+          context.asarHeaderAdmission === undefined
+            ? {}
+            : { headerAdmission: context.asarHeaderAdmission },
+        );
         ownedReaders.push({ reader: nested, path });
         stack.push({
           reader: nested,
@@ -306,9 +328,11 @@ const visitReader = async (
       });
       if (cleanup.kind === "failed") {
         failure = {
-          cause: ArtifactReaderFailure.withCleanup(
-            failure === undefined ? cleanup.cause : failure.cause,
-            ArtifactReaderFailure.cleanupObservation(cleanup.cause, resource),
+          cause: context.resources.cleanupFailure(
+            failure === undefined
+              ? { kind: "completed" }
+              : { kind: "failed", cause: failure.cause },
+            [cleanup],
           ),
         };
       }
@@ -501,6 +525,7 @@ const createUnanalyzedArtifactLookup = (
     occurrence.artifact_id === null &&
     relevantKind(occurrence.logical_path) !== undefined;
   return {
+    coverage: snapshot.coverage,
     get(path) {
       if (requested.has(path)) return requested.get(path);
       const occurrence =
@@ -626,5 +651,6 @@ const abortIfNeeded = (signal?: AbortSignal): void => {
     throw new ArtifactReaderFailure(
       "cancelled",
       "JavaScript artifact reconstruction cancelled",
+      { cause: signal.reason },
     );
 };

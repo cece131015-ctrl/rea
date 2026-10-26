@@ -1,9 +1,7 @@
 import { throwIfJadxInterrupted } from "./JadxInterruption.js";
 import { Client } from "@modelcontextprotocol/client";
-import {
-  createAnalysisExecution,
-  type AnalysisExecution,
-} from "../application/AnalysisProvider.js";
+import { createAnalysisExecution } from "../application/AnalysisProvider.js";
+import type { AndroidAnalysisExecution } from "../application/android/AndroidAnalysisPort.js";
 import type { AndroidRequest } from "../domain/android/androidAnalysis.js";
 import type { AndroidPartialObservation } from "../domain/android/androidPartialObservation.js";
 import {
@@ -13,12 +11,17 @@ import {
   AnalysisResourceConstraintError,
 } from "../domain/analysisErrorCore.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
-import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
+import {
+  jsonObjectSchema,
+  jsonValueSchema,
+  type JsonValue,
+} from "../domain/jsonValue.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import type { OwnedProviderProcessSpawnOptions } from "../process/ProviderProcess.js";
 import { analyzeJadxRequest, type JadxToolPort } from "./JadxAnalysis.js";
 import { JadxMcpTransport, type JadxLauncher } from "./JadxMcpTransport.js";
 import {
+  parseJadxClassPage,
   jadxLoadSchema,
   parseJadxFailure,
   jadxRuntimeSchema,
@@ -31,6 +34,16 @@ import {
   JADX_PROVIDER_IDENTITY,
   JADX_LIMITATIONS,
 } from "./JadxRelease.js";
+
+type JadxCall = {
+  readonly operation: string;
+  readonly input: Readonly<Record<string, JsonValue>>;
+  readonly response: JsonValue;
+};
+type JadxCallObservation = {
+  readonly complete: JadxCall;
+  inline?: JsonValue;
+};
 
 /** One owned engine connection; its wire protocol stays inside the Android adapter. */
 export class JadxSession {
@@ -47,11 +60,7 @@ export class JadxSession {
         readonly bridgeHash: string;
       }
     | undefined;
-  #observedCalls: {
-    readonly operation: string;
-    readonly input: Readonly<Record<string, JsonValue>>;
-    readonly response: JsonValue;
-  }[] = [];
+  #observedCalls: JadxCallObservation[] = [];
   #serverName: string | null = null;
   #serverVersion: string | null = null;
   #engineVersion: string | null = null;
@@ -73,7 +82,7 @@ export class JadxSession {
     readonly signal: AbortSignal;
     /** Selected whole-operation deadline; also bounds each upstream call. */
     readonly timeoutMs: number;
-  }): Promise<AnalysisExecution> {
+  }): Promise<AndroidAnalysisExecution> {
     const { request, target, snapshot, jarHash, signal, timeoutMs } = context;
     this.#partialContext = {
       operation: request.operation,
@@ -147,21 +156,39 @@ export class JadxSession {
           Math.floor(runtime.max_heap_bytes / (1024 * 1024)) || null,
       } as const;
       const result = await analyzeJadxRequest(tools, request, loaded, engine);
-      return createAnalysisExecution(result, JADX_PROVIDER_IDENTITY, {
-        rawResult: {
-          server,
-          bridge_sha256: context.bridgeHash,
-          jar_sha256: jarHash,
-          loaded,
-          calls: this.#observedCalls,
-        },
-        subject: target,
-        limitations: JADX_LIMITATIONS,
-        locations:
-          request.operation === "inspect_android_package"
-            ? [{ kind: "artifact-path", path: "AndroidManifest.xml" }]
-            : [],
+      const raw = jsonObjectSchema.parse({
+        server,
+        bridge_sha256: context.bridgeHash,
+        jar_sha256: jarHash,
+        loaded,
       });
+      const execution = createAnalysisExecution(
+        result,
+        JADX_PROVIDER_IDENTITY,
+        {
+          rawResult: {
+            ...raw,
+            calls: this.#observedCalls.map(({ complete }) => complete),
+          },
+          subject: target,
+          limitations: JADX_LIMITATIONS,
+          locations:
+            request.operation === "inspect_android_package"
+              ? [{ kind: "artifact-path", path: "AndroidManifest.xml" }]
+              : [],
+        },
+      );
+      return request.operation === "search_android_classes"
+        ? {
+            ...execution,
+            searchRawSummary: {
+              ...raw,
+              calls: this.#observedCalls.map(
+                ({ complete, inline }) => inline ?? complete,
+              ),
+            },
+          }
+        : execution;
     } finally {
       signal.removeEventListener("abort", abort);
     }
@@ -189,7 +216,7 @@ export class JadxSession {
         server_version: this.#serverVersion,
         engine_version: this.#engineVersion,
       },
-      calls: this.#observedCalls,
+      calls: this.#observedCalls.map(({ complete }) => complete),
     };
   }
 
@@ -216,7 +243,7 @@ export class JadxSession {
     const call = async (
       name: string,
       input: Readonly<Record<string, JsonValue>>,
-    ): Promise<string> => {
+    ) => {
       throwIfJadxInterrupted(signal);
       // Keep an explicit bound: omitting it falls back to the SDK's 60-second default.
       const response = await this.#client.callTool(
@@ -225,10 +252,12 @@ export class JadxSession {
       );
       const observedResponse = jsonValueSchema.parse(response);
       const call = { operation: name, input, response: observedResponse };
-      this.#observedCalls.push(call);
-      const envelope = parseJadxEnvelope(response, request.operation);
-      if (envelope.failed) {
-        const failure = parseJadxFailure(envelope.text);
+      const observation: JadxCallObservation = { complete: call };
+      this.#observedCalls.push(observation);
+      const envelope = parseJadxEnvelope(observedResponse, request.operation);
+      const text = envelope.content[0].text;
+      if (envelope.isError === true) {
+        const failure = parseJadxFailure(text);
         if (failure !== undefined) {
           if (name === "load_apk" && failure.kind === "jvm-memory-failure")
             throw new AnalysisResourceConstraintError(
@@ -266,18 +295,37 @@ export class JadxSession {
         throw new ProviderAdapterError("jadx", request.operation, {
           diagnostics: {
             upstream_operation: name,
-            reason: envelope.text,
+            reason: text,
             target_path: target.path,
             target_sha256: target.sha256,
           },
         });
       }
-      return envelope.text;
+      return { text, envelope, observation };
     };
     return {
-      text: call,
+      text: async (name, input) => (await call(name, input)).text,
       json: async (name, input) =>
-        parseJadxJson(await call(name, input), request.operation),
+        parseJadxJson((await call(name, input)).text, request.operation),
+      listClasses: async (input) => {
+        const reply = await call("list_classes", input);
+        const page = parseJadxClassPage(
+          parseJadxJson(reply.text, request.operation),
+        );
+        const { items, ...audit } = page;
+        reply.observation.inline = {
+          ...reply.observation.complete,
+          inventory_elided: true,
+          response: {
+            ...reply.envelope,
+            content: reply.envelope.content.map((entry) => ({
+              ...entry,
+              text: JSON.stringify({ ...audit, items_omitted: items.length }),
+            })),
+          },
+        };
+        return page;
+      },
     };
   }
 }

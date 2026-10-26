@@ -1,6 +1,5 @@
 import { closeOwnedWebResources } from "./closeOwnedWebResources.js";
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
 import { z } from "zod";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
@@ -9,14 +8,13 @@ import {
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
-import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
-import { jsonObjectSchema } from "../domain/jsonValue.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   selectedWebScriptArtifactsSchema,
   webArtifactFileSchema,
 } from "../domain/webScriptArtifacts.js";
 import {
+  DEFAULT_WEB_SOURCE_MAP_DECODE_TIMEOUT_MS,
   WEB_SOURCE_MAP_LIMITS,
   webSourceLocationInputSchema,
   webSourceLocationResultSchema,
@@ -35,6 +33,7 @@ import type {
   WebSourceMapPort,
 } from "./WebSourceLocationPorts.js";
 import { completeProviderEvidence } from "./ProviderOperationExecution.js";
+import { parseAnalysisInput } from "./AnalysisInput.js";
 
 const OPERATION = "trace_web_source_location";
 const artifactsSchema = selectedWebScriptArtifactsSchema.extend({
@@ -52,17 +51,19 @@ const LIMITATIONS = [
   "Lookup returns all segments at the greatest generated position not greater than the selected point, including earlier lines and generated-only segments. A mapped point does not establish an executed range or UI causality.",
   "Regular maps and inline indexed sections are supported. External section URLs are unsupported; unknown extensions are retained in raw map text and are not interpreted.",
 ];
-const CODEC_BUDGET =
-  "Complete evidence has a 4 MiB map, 32 MiB reply, 262144 decoded rows/segments and 64-level section budget. The owned codec has a 20-second deadline";
+const codecBudget = (timeoutMs: number): string =>
+  `Complete evidence has a 4 MiB map, 32 MiB reply, 262144 decoded rows/segments and 64-level section budget. The owned codec has a ${String(timeoutMs)} ms decode_timeout_ms deadline`;
 /** Bun accepts but ignores the codec's V8 heap flags; Windows enforces a commit limit instead. */
 const codecBudgetLimitation = (
   runtime: WebSourceMapReport["runtime"],
+  timeoutMs: number,
 ): string => {
+  const budget = codecBudget(timeoutMs);
   if (runtime.id === "node-v8")
-    return `${CODEC_BUDGET}, ${String(WEB_SOURCE_MAP_LIMITS.codecHeapMiB)} MiB old-generation heap and one V8 worker; cleanup may extend the deadline. V8 heap limits do not establish aggregate RSS limits.`;
+    return `${budget}, ${String(WEB_SOURCE_MAP_LIMITS.codecHeapMiB)} MiB old-generation heap and one V8 worker; cleanup may extend the deadline. V8 heap limits do not establish aggregate RSS limits.`;
   return runtime.process_memory_limit_bytes === null
-    ? `${CODEC_BUDGET}; cleanup may extend the deadline. The codec ran on Bun, which does not enforce REA's V8 heap flags, so no codec heap limit is established.`
-    : `${CODEC_BUDGET}; cleanup may extend the deadline. The codec ran on Bun, which does not enforce REA's V8 heap flags; a Windows Job Object limited its committed memory to ${String(runtime.process_memory_limit_bytes)} bytes, which is not a heap or RSS limit.`;
+    ? `${budget}; cleanup may extend the deadline. The codec ran on Bun, which does not enforce REA's V8 heap flags, so no codec heap limit is established.`
+    : `${budget}; cleanup may extend the deadline. The codec ran on Bun, which does not enforce REA's V8 heap flags; a Windows Job Object limited its committed memory to ${String(runtime.process_memory_limit_bytes)} bytes, which is not a heap or RSS limit.`;
 };
 
 /** Join verified captured bytes with an explicitly selected source-map point. */
@@ -87,16 +88,14 @@ export class WebSourceLocationService {
     rawInput: unknown,
     options?: ExecutionOptions,
   ): Promise<Result<Evidence, AnalysisError>> {
-    if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
-    const parsed = webSourceLocationInputSchema.safeParse(rawInput);
-    if (!parsed.success)
-      return err(
-        analysisInputErrorFromIssues(OPERATION, parsed.error.issues, rawInput, {
-          cause: parsed.error,
-        }),
-      );
-    const input = parsed.data;
+    const parsed = parseAnalysisInput(
+      OPERATION,
+      rawInput,
+      webSourceLocationInputSchema,
+      options?.signal,
+    );
+    if (!parsed.ok) return parsed;
+    const input = parsed.value;
     const admitted = admitContext(input);
     if (!admitted.ok) return admitted;
     const loaded = await this.artifacts.load(input, options);
@@ -114,22 +113,29 @@ export class WebSourceLocationService {
     if (!pairing.ok) return pairing;
     const generatedOffset = pairing.value;
     if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
+      return err(
+        new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }),
+      );
     const traced = await this.decoder.trace(
       {
         text: map.text,
         path: map.file.path,
         url: map.url,
         position: input.generated_position,
+        ...(input.decode_timeout_ms === undefined
+          ? {}
+          : { decodeTimeoutMs: input.decode_timeout_ms }),
       },
       options,
     );
     if (!traced.ok) return traced;
     const report = verifyReport(input, map.file.sha256, traced.value);
     if (!report.ok) return report;
+    const decodeTimeoutMs =
+      input.decode_timeout_ms ?? DEFAULT_WEB_SOURCE_MAP_DECODE_TIMEOUT_MS;
     const limitations = [
       ...LIMITATIONS,
-      codecBudgetLimitation(report.value.runtime),
+      codecBudgetLimitation(report.value.runtime, decodeTimeoutMs),
     ];
     const normalized = webSourceLocationResultSchema.safeParse({
       ...report.value,
@@ -160,7 +166,7 @@ export class WebSourceLocationService {
         },
         {
           operation: OPERATION,
-          parameters: jsonObjectSchema.parse(input),
+          parameters: input,
           result: normalized.data,
           rawResult: { source_map_text: map.text },
           confidence: "derived",
@@ -197,15 +203,6 @@ const invalid = (
 const admitContext = (
   input: WebSourceLocationInput,
 ): Result<null, AnalysisError> => {
-  for (const [path, value] of [
-    ["manifest_path", input.manifest_path],
-    ["source_map.path", input.source_map.path],
-  ] as const)
-    if (!isAbsolute(value))
-      return invalid(
-        path.split("."),
-        "Expected an absolute filesystem path on this host.",
-      );
   if (!URL.canParse(input.source_map.url))
     return invalid(
       ["source_map", "url"],

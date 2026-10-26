@@ -1,13 +1,16 @@
+import type { AnalysisSettingsReader } from "../domain/analysisSettings.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
-import type { FileCloseResourceOwner } from "../application/AnalysisProvider.js";
+import type {
+  RetainedResourceScope,
+  ExecutionOptions,
+} from "../application/AnalysisProvider.js";
 import { analysisClientFailureForOperation } from "../providers/AnalysisClientFailure.js";
 import { throwIfJadxInterrupted } from "./JadxInterruption.js";
 import { chmod, copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AndroidAnalysisPort } from "../application/android/AndroidAnalysisPort.js";
-import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
@@ -125,6 +128,22 @@ interface PendingCleanup {
   reportedErrors: WeakRef<AnalysisError>[];
 }
 
+/** Every descriptor owner nested in one rejected close, without treating a later owner as the first. */
+const retainedCleanupOwners = (
+  cause: unknown,
+): ReadonlySet<OwnedFileHandle> => {
+  const owners = new Set<OwnedFileHandle>();
+  const visit = (value: unknown, seen: Set<unknown>): void => {
+    if (typeof value !== "object" || value === null || seen.has(value)) return;
+    seen.add(value);
+    if (!(value instanceof RegularFileCleanupFailure)) return;
+    owners.add(value.owner);
+    if (value.outcome.kind === "failed") visit(value.outcome.cause, seen);
+  };
+  visit(cause, new Set());
+  return owners;
+};
+
 const cleanupResources = (resources: PendingCleanup): readonly string[] => [
   ...(resources.session === undefined
     ? []
@@ -166,16 +185,22 @@ const cleanup = async (
     sessionCloseFailed = true;
     sessionCloseCause = cause;
   }
+  const tracked = retainedCleanupOwners(resources.operationCause);
+  const trackedInMap = [...tracked].filter((owner) =>
+    resources.fileHandles.has(owner),
+  );
   const fileCloseCauses: unknown[] = [];
   for (const owner of resources.fileHandles.keys()) {
     try {
       await owner.close();
+      resources.fileHandles.delete(owner);
+      // One descriptor's release clears only that owner. The admission error
+      // stays incomplete until every owner from the same close failure is gone.
       if (
-        resources.operationCause instanceof RegularFileCleanupFailure &&
-        resources.operationCause.owner === owner
+        trackedInMap.length > 0 &&
+        trackedInMap.every((candidate) => !resources.fileHandles.has(candidate))
       )
         resources.previousError?.resolveCleanup();
-      resources.fileHandles.delete(owner);
     } catch (cause: unknown) {
       fileCloseCauses.push(cause);
     }
@@ -214,6 +239,8 @@ const cleanup = async (
     return err(cleanupFailure(resources, cleanupError));
   }
   try {
+    // Child descriptors are released above. The workspace root follows only
+    // after those owners confirm close.
     await root?.close();
     resources.root = undefined;
   } catch (cause) {
@@ -250,7 +277,7 @@ export class JadxProvider implements AndroidAnalysisPort {
   readonly #inspections = new Set<
     Promise<Awaited<ReturnType<typeof inspectJadxAvailability>>>
   >();
-  readonly #prerequisiteOwner: FileCloseResourceOwner = {
+  readonly #prerequisiteOwner: RetainedResourceScope = {
     retain: (owner, resource) =>
       this.#prerequisites.retain({
         kind: "lease",
@@ -263,11 +290,14 @@ export class JadxProvider implements AndroidAnalysisPort {
   constructor(
     readonly environment: Readonly<Record<string, string | undefined>>,
     readonly launcher?: JadxLauncher,
+    readonly settings?: AnalysisSettingsReader,
   ) {}
 
   /** Report actual local prerequisites without starting JADX or opening a target. */
   inspectAvailability(signal?: AbortSignal) {
     const pending = inspectJadxAvailability(this.environment, {
+      operationTimeoutMs:
+        this.settings?.().overrides["jadx.operation_timeout_ms"],
       resourceOwner: this.#prerequisiteOwner,
       signal:
         signal === undefined
@@ -412,11 +442,12 @@ export class JadxProvider implements AndroidAnalysisPort {
     request: AndroidRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
-    // The deadline is fixed per provider environment; an unusable value is
-    // refused before any file handle, workspace, or engine is acquired.
+    // Resolve the accepted operation's override before acquiring any resource.
+    // An unusable launch value is refused without starting the engine.
     const timeoutMs = resolveJadxOperationTimeout(
       this.environment,
       request.operation,
+      this.settings?.().overrides["jadx.operation_timeout_ms"],
     );
     if (!timeoutMs.ok) return timeoutMs;
     const timeout = AbortSignal.timeout(timeoutMs.value);
@@ -510,12 +541,16 @@ export class JadxProvider implements AndroidAnalysisPort {
           root.failureSignal === undefined
             ? signal
             : AbortSignal.any([signal, root.failureSignal]);
+        const retainSnapshot = (path: string, owner: OwnedFileHandle): void => {
+          fileHandles.set(owner, path);
+        };
         const engine = await snapshotAndroidEngine(
           configuration.jar,
           jarHash,
           root.path,
           request.operation,
           workspaceSignal,
+          retainSnapshot,
         );
         const snapshot = await snapshotAndroidTarget(
           target.path,
@@ -523,6 +558,7 @@ export class JadxProvider implements AndroidAnalysisPort {
           root.path,
           request.operation,
           workspaceSignal,
+          retainSnapshot,
         );
         const bridge = join(root.path, "ReaJadxBridge.java");
         await copyFile(BRIDGE_SOURCE, bridge);
@@ -543,6 +579,9 @@ export class JadxProvider implements AndroidAnalysisPort {
         session = new JadxSession(
           {
             command: configuration.java,
+            // Java PATH shims may execute an interpreter or replace themselves.
+            // Match the prerequisite probe's run-token ownership policy.
+            expectedCommand: null,
             arguments: [
               ...configuration.jvmArguments,
               "--class-path",

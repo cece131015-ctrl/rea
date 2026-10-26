@@ -27,7 +27,7 @@ it.each(["before-data", "after-data"] as const)(
     expect(
       result.readTypeDetail("0x140002280", NATIVE_AOT_MAX_REPORT_BYTES),
     ).toBeUndefined();
-    expect(bytes).toEqual(before);
+    expect(Buffer.compare(bytes, before)).toBe(0);
   },
 );
 
@@ -110,7 +110,7 @@ it("preserves source section order while admitting a unique unsorted mapping", (
     status: "complete",
     method_tables: 3,
   });
-  expect(bytes).toEqual(before);
+  expect(Buffer.compare(bytes, before)).toBe(0);
 });
 
 it("does not confuse raw alignment padding with virtual section ownership", () => {

@@ -73,7 +73,11 @@ export const traceNativeValues = async (
   };
   while (pending.length > 0) {
     if (signal?.aborted)
-      return err(new AnalysisCancelledError("trace_native_values"));
+      return err(
+        new AnalysisCancelledError("trace_native_values", {
+          cause: signal.reason,
+        }),
+      );
     const next = pending.shift();
     if (
       next === undefined ||
@@ -103,7 +107,9 @@ export const traceNativeValues = async (
     );
     decompilations++;
     if (!execution.ok) {
-      if (execution.error._tag === "AnalysisCancelledError")
+      // A seed failure has no trace to qualify. Preserve the provider's typed
+      // refusal; failures after a validated seed remain partial observations.
+      if (next.depth === 0 || execution.error._tag === "AnalysisCancelledError")
         return err(execution.error);
       unknowns.push({
         procedure: next.procedure,
@@ -113,7 +119,7 @@ export const traceNativeValues = async (
       continue;
     }
     const parsed = functionDossierSchema.safeParse(execution.value.result);
-    if (!parsed.success || execution.value.subject === null)
+    if (!parsed.success || execution.value.subject == null)
       return err(
         new AnalysisOutputError(
           "trace_native_values",
@@ -435,7 +441,7 @@ export const traceNativeValues = async (
     limitations: [
       "Static decompiler def-use graphs cover recovered block members; when membership is unavailable they exclude operations marked dead. Logical CALL argument positions bind to recovered HighParam ordinals and RETURN values bind to recovered CALL outputs; these are decompiler-derived dependencies, not original source or runtime observations. Missing parameters, variadic arguments and alias dependencies remain unknown.",
       "LOAD and STORE are memory operations; object fields, persistent state and RNG semantics are not inferred from names or pseudocode.",
-      "Traversal caps depth, decompilations, call-site resolutions, nodes, edges and node payloads (8 MiB). Complete serialized output is bounded to 32 MiB. Pagination reruns analysis and returns edges whose source is on the node page; endpoints outside the page retain stable identities.",
+      "Traversal caps depth, decompilations, call-site resolutions, nodes, edges and node payloads (8388608 bytes, 8 MiB). This release has no runtime override for the 8388608-byte node-payload allowance. Complete serialized output is bounded to 33554432 bytes (32 MiB) and that output allowance has no runtime override. Pagination reruns analysis and returns edges whose source is on the node page; endpoints outside the page retain stable identities.",
       ...renderSourceLimitations(sourceLimitations),
     ],
   });
@@ -443,8 +449,14 @@ export const traceNativeValues = async (
     return err(
       new AnalysisOutputError(
         "trace_native_values",
-        "Graph output exceeds 32 MiB; lower max_nodes, max_edges or page limit",
+        "Graph output exceeds 33554432 bytes (32 MiB). This release has no runtime override. Lower max_nodes, max_edges, or the page limit.",
       ),
+    );
+  if (signal?.aborted)
+    return err(
+      new AnalysisCancelledError("trace_native_values", {
+        cause: signal.reason,
+      }),
     );
   return ok(result);
 };

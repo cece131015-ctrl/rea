@@ -213,6 +213,7 @@ describe("headless IDA containing procedure", () => {
         procedure: {
           address: "0x1000",
           name: "main",
+          symbol: null,
           classification: null,
           body: {
             available: false,

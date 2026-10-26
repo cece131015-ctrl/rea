@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
+import { inspectWindowsNativeReadiness } from "../process/WindowsAuthority.js";
 import {
   loadWindowsNativeAuthority,
   type WindowsNativeLoadHost,
@@ -221,6 +222,34 @@ describe("packaged Windows native artifact validation", () => {
       failureStage: "self-test",
       retryable: true,
       reason: expect.stringContaining("private DACL: access denied"),
+    });
+  });
+
+  it("explains an OS policy refusal of the verified artifact without file-restore advice", () => {
+    const value = fixture();
+    const loaded = loadWindowsNativeAuthority({
+      ...value.host,
+      loadArtifact: () => {
+        throw new Error(
+          "An Application Control policy has blocked this file.\r\n\\\\?\\C:\\rea\\rea-windows-x64.node",
+        );
+      },
+    });
+    expect(loaded).toMatchObject({
+      available: false,
+      failureStage: "load",
+      reason: expect.stringContaining(
+        "An Application Control policy has blocked this file.",
+      ),
+    });
+    expect(loaded).not.toHaveProperty("retryable");
+    const readiness = inspectWindowsNativeReadiness("win32", loaded);
+    expect(readiness).toMatchObject({
+      code: "runtime_missing",
+      remediation: expect.stringContaining("Smart App Control"),
+    });
+    expect(readiness).not.toMatchObject({
+      remediation: expect.stringContaining("restore native/windows/build"),
     });
   });
 

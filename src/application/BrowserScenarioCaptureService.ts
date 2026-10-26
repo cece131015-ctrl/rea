@@ -11,10 +11,14 @@ import type { Evidence } from "../domain/evidence.js";
 import type { BrowserScenario } from "../domain/browserScenario.js";
 import { err, type Result } from "../domain/result.js";
 import { browserScenarioCaptureSchema } from "../domain/browserScenarioCapture.js";
-import { completeProviderEvidence } from "./ProviderOperationExecution.js";
+import {
+  completeProviderEvidence,
+  keepIncompleteObservation,
+} from "./ProviderOperationExecution.js";
 
 const OPERATION = "capture_browser_scenario" as const;
-const PROVIDER_ID = "rea-playwright-browser-scenario";
+/** The Playwright scenario provider every scenario-driven operation runs. */
+export const BROWSER_SCENARIO_PROVIDER_ID = "rea-playwright-browser-scenario";
 
 /** Execute one controlled browser scenario using its explicit request scope. */
 export const captureBrowserScenario = async (
@@ -25,7 +29,7 @@ export const captureBrowserScenario = async (
   if (provider === undefined)
     return err(
       new AnalysisCapabilityUnavailableError(
-        PROVIDER_ID,
+        BROWSER_SCENARIO_PROVIDER_ID,
         OPERATION,
         "browser scenario provider is not configured",
       ),
@@ -43,6 +47,8 @@ export const captureBrowserScenario = async (
       partial.kind === "browser-scenario-observation"
     ) {
       const report = browserScenarioCaptureSchema.safeParse(partial.capture);
+      // Only a completed capture becomes Evidence. A JSON-safe incomplete
+      // observation stays on the owner error, including typed cancellation.
       if (
         report.success &&
         report.data.steps.every(({ status }) => status === "completed")
@@ -52,19 +58,16 @@ export const captureBrowserScenario = async (
           report.data,
           provider.identity(),
         );
-      } else if (!report.success) {
-        if (captured.error instanceof AnalysisCancelledError)
-          return err(
-            new AnalysisOutputError(
-              OPERATION,
-              "Browser scenario provider retained a malformed completed capture.",
-              { cause: report.error },
-            ),
-          );
         return captured;
       }
     }
-    return captured;
+    return err(
+      keepIncompleteObservation(
+        captured.error,
+        OPERATION,
+        "Browser scenario provider retained a non-JSON incomplete observation.",
+      ),
+    );
   }
   const report = browserScenarioCaptureSchema.safeParse(captured.value);
   if (!report.success)

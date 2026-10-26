@@ -2,7 +2,6 @@ import { realpath, stat } from "node:fs/promises";
 import { homeDirectoryFromEnvironment } from "../config/homeDirectory.js";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import spawn from "cross-spawn";
 import { lt, valid } from "semver";
 
 import { PRODUCT_IDENTITY } from "../identity.js";
@@ -16,10 +15,9 @@ import {
   type ReleaseLookupFailure,
   type UpdateHost,
   type UpdateInstallation,
-  type UpdateOutput,
 } from "./Update.js";
 import { planIntegrationMaintenance } from "./UpdateMaintenance.js";
-import { withoutPackageRunnerIdentity } from "./ClientRegistrationIdentity.js";
+import { UpdateCommandRunner } from "./UpdateCommandRunner.js";
 
 /** npm filesystem queries used to identify the installation being updated. */
 export interface NpmInstallationHost {
@@ -33,64 +31,6 @@ export interface BunInstallationHost {
   canonicalPath(path: string): Promise<string>;
   isFile(path: string): Promise<boolean>;
 }
-
-/** Run an updater subprocess with complete diagnostics and isolated machine output. */
-export const runUpdateCommand = (
-  command: readonly string[],
-  selectedEnvironment: Readonly<NodeJS.ProcessEnv>,
-  output: UpdateOutput = "structured",
-  workingDirectory: string | undefined = undefined,
-): Promise<Result<string, string>> =>
-  new Promise((resolveResult) => {
-    const [executable, ...args] = command;
-    if (executable === undefined) {
-      resolveResult(err("No executable supplied."));
-      return;
-    }
-    // A fresh installed entry point must not inherit a package runner's invocation identity.
-    const environment = withoutPackageRunnerIdentity(selectedEnvironment);
-    const child = spawn(executable, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: environment,
-      windowsHide: true,
-      ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      stdout += chunk;
-      if (output === "human") process.stderr.write(chunk);
-    });
-    child.stderr?.on("data", (chunk: string) => {
-      stderr += chunk;
-      if (output === "human") process.stderr.write(chunk);
-    });
-    child.once("error", (cause) => resolveResult(err(cause.message)));
-    child.once("close", (code, signal) =>
-      resolveResult(
-        code === 0
-          ? ok(stdout.trim())
-          : err(
-              stderr.trim() ||
-                stdout.trim() ||
-                (signal === null
-                  ? `Process exited with code ${String(code)}.`
-                  : `Process terminated by ${signal}.`),
-            ),
-      ),
-    );
-  });
-
-const requireCommandOutput = async (
-  command: readonly string[],
-  environment: Readonly<NodeJS.ProcessEnv>,
-): Promise<string> => {
-  const result = await runUpdateCommand(command, environment);
-  if (!result.ok) throw new Error(result.error);
-  return result.value;
-};
 
 /** Resolve the global prefix only when it owns the running package. */
 export const detectNpmInstallation = async (
@@ -295,6 +235,12 @@ export const systemUpdateHost = (
   environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): UpdateHost => {
   const resources = new ArtifactResourceScope();
+  const commands = new UpdateCommandRunner();
+  const requireOutput = async (command: readonly string[]): Promise<string> => {
+    const result = await commands.runProbe(command, environment);
+    if (!result.ok) throw new Error(result.error);
+    return result.value;
+  };
   return {
     installation: async () =>
       (await detectBunInstallation(
@@ -304,15 +250,13 @@ export const systemUpdateHost = (
       )) ??
       detectNpmInstallation(packageRoot, {
         canonicalPath: realpath,
-        globalRoot: () =>
-          requireCommandOutput(["npm", "root", "--global"], environment),
-        globalPrefix: () =>
-          requireCommandOutput(["npm", "prefix", "--global"], environment),
+        globalRoot: () => requireOutput(["npm", "root", "--global"]),
+        globalPrefix: () => requireOutput(["npm", "prefix", "--global"]),
       }),
     latestVersion: async (installation) => {
       const context = packageManagerContext(installation, environment);
       if (installation?.manager === "bun") {
-        const version = await runUpdateCommand(
+        const version = await commands.runProbe(
           ["bun", "--version"],
           context.environment,
           "structured",
@@ -329,7 +273,7 @@ export const systemUpdateHost = (
           });
       }
       return npmReleaseLookup(
-        await runUpdateCommand(
+        await commands.runProbe(
           installation?.manager === "bun"
             ? BUN_LATEST_VERSION_COMMAND
             : npmLatestVersionCommand(installation),
@@ -341,7 +285,7 @@ export const systemUpdateHost = (
     },
     installVersion: async (installation, version, output) => {
       const context = packageManagerContext(installation, environment);
-      const result = await runUpdateCommand(
+      const result = await commands.runInstall(
         updateInstallCommand(installation, version),
         context.environment,
         output,
@@ -350,7 +294,7 @@ export const systemUpdateHost = (
       return result.ok ? ok(undefined) : result;
     },
     installedVersion: (installation) =>
-      runUpdateCommand(
+      commands.runProbe(
         [
           process.execPath,
           join(installation.packageRoot, "scripts", "rea.mjs"),
@@ -363,16 +307,26 @@ export const systemUpdateHost = (
         home ?? homeDirectoryFromEnvironment(environment, process.platform),
         join(installation.packageRoot, "scripts", "rea.mjs"),
         environment,
-        (command) => runUpdateCommand(command, environment),
+        (command) => commands.runProbe(command, environment),
         resources,
       ),
     close: async () => {
-      try {
-        await resources.close();
-        return undefined;
-      } catch (cause: unknown) {
-        return `Update resource cleanup failed: ${cause instanceof Error ? cause.message : String(cause)}`;
-      }
+      const results = await Promise.allSettled([
+        commands.close(),
+        resources.close(),
+      ]);
+      const failures = results.flatMap((result) =>
+        result.status === "rejected"
+          ? [
+              result.reason instanceof Error
+                ? result.reason.message
+                : String(result.reason),
+            ]
+          : [],
+      );
+      return failures.length === 0
+        ? undefined
+        : `Update resource cleanup failed: ${failures.join("; ")}`;
     },
   };
 };

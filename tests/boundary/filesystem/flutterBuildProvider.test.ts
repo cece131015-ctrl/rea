@@ -11,8 +11,8 @@ import {
   engineFixtureImage,
   buildElf64Image,
   REFERENCE_HASH,
+  snapshotSection,
 } from "../../../src/flutter/FlutterBuild.fixture.js";
-import { snapshotSection } from "../../../src/flutter/FlutterBuild.fixture.js";
 import { FlutterBuildProvider } from "../../../src/flutter/FlutterBuildProvider.js";
 import { FlutterBuildAnalysisService } from "../../../src/application/flutter/FlutterBuildAnalysisService.js";
 import { finishAnalysisCommand } from "../../../src/cli/finishAnalysisCommand.js";
@@ -111,6 +111,71 @@ const analyzeImage = async (bytes: Buffer, operation: FlutterOperation) => {
   if (!result.ok) throw result.error;
   return result.value;
 };
+
+it.each([false, true])(
+  "qualifies unified snapshot exports without aliasing legacy sources (text=%s)",
+  async (includeText) => {
+    const symbols = [
+      { name: "_kDartSnapshotData", value: 0x1000, size: 52 },
+      ...(includeText
+        ? [{ name: "_kDartSnapshotText", value: 0x1100, size: 16 }]
+        : []),
+    ];
+    const image = Buffer.alloc(0x1110);
+    buildElf64Image(symbols).copy(image);
+    const data = snapshotSection(REFERENCE_HASH);
+    data.writeBigUInt64LE(2n, 12); // Pinned unified producer enum; support is not inferred.
+    data.copy(image, 0x1000);
+    const path = await buildApk("unified.apk", [
+      { path: "lib/arm64-v8a/libapp.so", bytes: image },
+    ]);
+    const provider = new FlutterBuildProvider();
+    onTestFinished(() => provider.close());
+    const inspected = await provider.execute({
+      operation: "inspect_dart_aot",
+      input: { path },
+    });
+    expect(inspected.ok).toBe(false);
+    if (inspected.ok)
+      throw new Error("Unified profile was admitted as split VM/isolate");
+    expect(projectAnalysisError(inspected.error)).toMatchObject({
+      code: "unsupported_target",
+      category: "unsupported_target",
+      details: {
+        diagnostics: {
+          supported_profile: "dart-2.14-split-full-aot",
+          observed_exports: symbols.map(({ name, value, size }) => ({
+            name,
+            offset: value,
+            size,
+          })),
+          abi: "arm64-v8a",
+          libapp_bytes: image.length,
+          libapp_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+      },
+    });
+    const identified = await provider.execute({
+      operation: "identify_flutter_build",
+      input: { path },
+    });
+    if (!identified.ok) throw identified.error;
+    const value = flutterResultSchemas.identify_flutter_build.parse(
+      identified.value.result,
+    );
+    expect(value.coverage).toBe("partial");
+    expect(value.abis[0]?.libapp).toMatchObject({
+      snapshot_hash: REFERENCE_HASH,
+      snapshot_hash_sources: 1,
+    });
+    expect(identified.value.limitations.join(" ")).toContain(
+      "supported legacy split VM/isolate profile",
+    );
+    expect(identified.value.limitations.join(" ")).not.toContain(
+      "library is truncated",
+    );
+  },
+);
 
 it.each([32, 64] as const)(
   "reads only ELF-owned notes in an ELF%s engine",
@@ -316,10 +381,33 @@ it.each([
       input: { path },
     });
     if (result.ok) throw new Error("expected owned I/O failure");
-    expect(projectAnalysisError(result.error).code).toBe("resource_constraint");
     expect(result.error.cause).toBe(cause);
-    expect(result.error.message).toContain(
-      "Provider-owned Flutter snapshot storage",
+    // Only storage exhaustion is a resource constraint; other owned-storage
+    // failures keep their system code instead of claiming a size allowance.
+    // These causes carry no errno path, so the failure is located by the owned
+    // workspace once allocated; before allocation no workspace exists.
+    const workspace =
+      stage === "root"
+        ? null
+        : (expect.stringMatching(/\/rea-flutter-[^/]+$/u) as unknown);
+    const location = { workspace_path: workspace, path: workspace };
+    expect(projectAnalysisError(result.error)).toMatchObject(
+      code === "ENOSPC"
+        ? {
+            code: "resource_constraint",
+            details: { reported_limits: { ...location, system_code: code } },
+          }
+        : {
+            code: "execution_failure",
+            details: {
+              provider_id: "flutter",
+              diagnostics: {
+                stage: "workspace",
+                ...location,
+                system_code: code,
+              },
+            },
+          },
     );
   },
 );
@@ -684,6 +772,7 @@ it("retains failed snapshot cleanup and retries it on close", async () => {
     { close: () => provider.close() },
     "flutter",
     "identify_flutter_build",
+    new AbortController().signal,
   );
   expect(result).toMatchObject({
     code: "cleanup_incomplete",
@@ -927,7 +1016,11 @@ it.each(["identify_flutter_build", "inspect_dart_aot"] as const)(
     const result = await provider.execute({ operation, input: { path } });
     if (result.ok) throw new Error("expected a size refusal");
     expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
-    expect(projectAnalysisError(result.error).code).toBe("resource_constraint");
+    const projected = projectAnalysisError(result.error);
+    expect(projected.code).toBe("resource_constraint");
+    expect(projected.retryable).toBe(false);
+    expect(projected.remediation.action).toContain("APK snapshot allowance");
+    expect(projected.remediation.action).not.toMatch(/evidence reply/u);
     expect(result.error).toMatchObject({
       operation,
       reportedLimits: {
@@ -1370,10 +1463,11 @@ it.each(["EACCES", "EPERM"] as const)(
       const admitted = vi
         .spyOn(regularFile, "openRegularFile")
         .mockImplementation(async (...args) => {
-          const handle = await original(...args);
+          const descriptor = await original(...args);
+          const { handle } = descriptor;
           if (stage === "read")
             vi.spyOn(handle, "read").mockRejectedValueOnce(cause);
-          return handle;
+          return descriptor;
         });
       const pathStat =
         stage === "revalidate"
@@ -1405,21 +1499,23 @@ it("detects same-size source rewrites with restored mtime through the opened des
   const admitted = vi
     .spyOn(regularFile, "openRegularFile")
     .mockImplementation(async (...args) => {
-      const handle = await nativeAdmission(...args);
-      // Admission returns an open descriptor; mutate its file before the final
-      // descriptor stat, preserving the size and restoring the visible mtime.
-      const nativeStat = handle.stat.bind(handle);
-      let calls = 0;
-      vi.spyOn(handle, "stat").mockImplementation(async (...statArgs) => {
-        calls += 1;
-        if (calls === 2) {
+      const descriptor = await nativeAdmission(...args);
+      const { handle } = descriptor;
+      // Rewrite after a real descriptor read. The retained admission snapshot
+      // remains the baseline for final verification, including ctime.
+      const nativeRead = handle.read.bind(handle);
+      let rewritten = false;
+      vi.spyOn(handle, "read").mockImplementation(async (...readArgs) => {
+        const result = await nativeRead(...readArgs);
+        if (!rewritten) {
+          rewritten = true;
           await new Promise((resolve) => setTimeout(resolve, 10));
           await writeFile(path, content);
           await utimes(path, before.atime, before.mtime);
         }
-        return nativeStat(...statArgs);
+        return result;
       });
-      return handle;
+      return descriptor;
     });
   onTestFinished(() => admitted.mockRestore());
   const provider = new FlutterBuildProvider();
@@ -1467,14 +1563,15 @@ it("stops a cancelled descriptor copy before writing its next chunk and releases
   const admitted = vi
     .spyOn(regularFile, "openRegularFile")
     .mockImplementation(async (...args) => {
-      const handle = await nativeAdmission(...args);
+      const descriptor = await nativeAdmission(...args);
+      const { handle } = descriptor;
       const nativeRead = handle.read.bind(handle);
       vi.spyOn(handle, "read").mockImplementation(async (...readArgs) => {
         const result = await nativeRead(...readArgs);
         controller.abort(new Error("cancelled while copy read was pending"));
         return result;
       });
-      return handle;
+      return descriptor;
     });
   onTestFinished(() => admitted.mockRestore());
   const removeRoot = vi.fn((root: string) =>

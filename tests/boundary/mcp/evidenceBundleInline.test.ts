@@ -12,10 +12,36 @@ import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { createAnalysisProfile } from "../../../src/domain/analysisProfile.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
 import { ANALYSIS_SNAPSHOT_TARGET } from "../../../src/domain/analysisSnapshot.fixture.js";
-import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
+
 import { EMPTY_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
 import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
 import { createServer } from "../../../src/server/createServer.js";
+import { JSON_BYTE_ORDER_MARK_MESSAGE } from "../../../src/application/Utf8JsonInput.js";
+
+it("preserves BOM recovery through public bundle import", async () => {
+  const root = await createTestTempDirectory("rea-bundle-bom-mcp-");
+  const path = join(root, "bundle.json");
+  await writeFile(path, "\uFEFF{}");
+  const session = createTestBinarySession(() => {
+    throw new Error("bundle import must not start a provider");
+  });
+  const { client, server } = await connectEvidenceMcp("bundle-bom", session);
+  try {
+    const response = await client.callTool({
+      name: "import_evidence_bundle",
+      arguments: { path },
+    });
+    expect(parseMcpToolError(response)).toMatchObject({
+      error: {
+        code: "evidence_integrity_mismatch",
+        message: JSON_BYTE_ORDER_MARK_MESSAGE,
+        remediation: { action: JSON_BYTE_ORDER_MARK_MESSAGE },
+      },
+    });
+  } finally {
+    await Promise.allSettled([client.close(), server.close(), session.close()]);
+  }
+});
 
 it("returns the complete session Evidence bundle in the tool result", async () => {
   const evidence = createEvidence(
@@ -169,7 +195,7 @@ const createBundleSourceSession = () => {
       predicateType: "rea.process-capture",
       operation: "capture_process_scenario",
       parameters: {},
-      result: jsonValueSchema.parse(EMPTY_PROCESS_CAPTURE_EXAMPLE),
+      result: EMPTY_PROCESS_CAPTURE_EXAMPLE,
       confidence: "observed",
       authority: "controlled-replay",
     }),

@@ -19,7 +19,7 @@ import { OwnedDirectoryHandle } from "../filesystem/OwnedDirectoryHandle.js";
 import {
   assertArtifactReadActive,
   artifactFileCancellationCause,
-  artifactFilePrimaryFailure,
+  artifactFilePrimaryFacts,
   bindArtifactFileCleanup,
   withArtifactRegularFile,
 } from "../artifacts/ArtifactFileOperation.js";
@@ -116,58 +116,62 @@ const fingerprint = async (
   for (const relative of files) {
     assertArtifactReadActive(signal);
     const path = join(root, relative);
-    await withArtifactRegularFile(path, resources, signal, async (handle) => {
-      const before = await handle.stat();
-      if (
-        !Number.isSafeInteger(before.size) ||
-        before.size > MAX_BYTES - bytesRead
-      )
-        throw new Error(
-          "Allegrex extension bytes exceed the inspection limit.",
-        );
-      if (relative === "extension.properties" && before.size > 65536)
-        throw new Error(
-          "Allegrex extension properties exceed the inspection limit.",
-        );
-      hash.update(JSON.stringify([relative, before.size]));
-      const buffer = Buffer.alloc(Math.min(65536, before.size + 1));
-      let offset = 0;
-      const chunks: Buffer[] = [];
-      // Serial reads keep final close behind every native read. One extra byte
-      // detects growth without a stream's read-ahead or unbounded allocation.
-      while (offset <= before.size) {
-        assertArtifactReadActive(signal);
-        const { bytesRead } = await handle.read(
-          buffer,
-          0,
-          Math.min(buffer.length, before.size - offset + 1),
-          offset,
-        );
-        assertArtifactReadActive(signal);
-        if (bytesRead === 0) break;
-        offset += bytesRead;
-        if (offset > before.size)
+    await withArtifactRegularFile(
+      path,
+      resources,
+      signal,
+      async ({ handle, initial: before }) => {
+        if (
+          !Number.isSafeInteger(before.size) ||
+          before.size > MAX_BYTES - bytesRead
+        )
+          throw new Error(
+            "Allegrex extension bytes exceed the inspection limit.",
+          );
+        if (relative === "extension.properties" && before.size > 65536)
+          throw new Error(
+            "Allegrex extension properties exceed the inspection limit.",
+          );
+        hash.update(JSON.stringify([relative, before.size]));
+        const buffer = Buffer.alloc(Math.min(65536, before.size + 1));
+        let offset = 0;
+        const chunks: Buffer[] = [];
+        // Serial reads keep final close behind every native read. One extra byte
+        // detects growth without a stream's read-ahead or unbounded allocation.
+        while (offset <= before.size) {
+          assertArtifactReadActive(signal);
+          const { bytesRead } = await handle.read(
+            buffer,
+            0,
+            Math.min(buffer.length, before.size - offset + 1),
+            offset,
+          );
+          assertArtifactReadActive(signal);
+          if (bytesRead === 0) break;
+          offset += bytesRead;
+          if (offset > before.size)
+            throw new Error(
+              `Allegrex component changed during inspection: ${relative}`,
+            );
+          const chunk = buffer.subarray(0, bytesRead);
+          hash.update(chunk);
+          if (relative === "extension.properties")
+            chunks.push(Buffer.from(chunk));
+        }
+        if (offset !== before.size)
+          throw new Error(`Truncated Allegrex component: ${relative}`);
+        if (
+          !sameRegularFileState(before, await handle.stat()) ||
+          !sameRegularFileState(before, await lstat(path))
+        )
           throw new Error(
             `Allegrex component changed during inspection: ${relative}`,
           );
-        const chunk = buffer.subarray(0, bytesRead);
-        hash.update(chunk);
+        bytesRead += before.size;
         if (relative === "extension.properties")
-          chunks.push(Buffer.from(chunk));
-      }
-      if (offset !== before.size)
-        throw new Error(`Truncated Allegrex component: ${relative}`);
-      if (
-        !sameRegularFileState(before, await handle.stat()) ||
-        !sameRegularFileState(before, await lstat(path))
-      )
-        throw new Error(
-          `Allegrex component changed during inspection: ${relative}`,
-        );
-      bytesRead += before.size;
-      if (relative === "extension.properties")
-        properties = Buffer.concat(chunks);
-    });
+          properties = Buffer.concat(chunks);
+      },
+    );
   }
   // Ghidra's extension.properties version is the compatible Ghidra version,
   // not the extension release (e.g. v21.4); content identity supplies the latter.
@@ -236,7 +240,7 @@ const ghidraPspInspectionError = (cause: unknown): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
   const cleanup =
     cause instanceof ArtifactReaderFailure ? cause.cleanup : undefined;
-  const primary = artifactFilePrimaryFailure(cause);
+  const { cause: primary } = artifactFilePrimaryFacts(cause);
   const reason = `PSP_EXTENSION_UNAVAILABLE: ${primary instanceof Error ? primary.message : String(primary)} Use a compatible caller-installed ghidra-allegrex under GHIDRA_INSTALL_DIR/Ghidra/Extensions; REA does not install it.`;
   const error =
     cause instanceof ArtifactReaderFailure && cause.reason === "cancelled"

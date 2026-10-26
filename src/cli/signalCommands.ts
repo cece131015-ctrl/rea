@@ -13,6 +13,7 @@ import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import { localPathStringSchema } from "../domain/localPath.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 export const registerSignalCommands = (
   cli: CliInstance,
@@ -62,6 +63,7 @@ export const registerSignalCommands = (
             service,
             "sigrok-recording",
             "inspect_signal_decoders",
+            signal,
           ),
         ),
       ),
@@ -69,7 +71,9 @@ export const registerSignalCommands = (
   cli.command(CLI_COMMANDS.decodeSignalRecording, {
     description:
       "Decode an existing signal recording with caller-supplied sigrok",
-    args: z.object({ path: z.string().describe("Local signal recording") }),
+    args: z.object({
+      path: localPathStringSchema.describe("Local signal recording"),
+    }),
     options: z
       .object({
         ...signalRecordingOptionsSchema.shape,
@@ -114,6 +118,7 @@ export const registerSignalCommands = (
             service,
             "sigrok-recording",
             "decode_signal_recording",
+            signal,
           );
         }),
       ),

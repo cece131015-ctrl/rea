@@ -170,7 +170,7 @@ const registerSharedReverseEngineeringEdgeCasesPart2 = (): void => {
           cleanupIncomplete: true,
           cleanup: { reason: "still running", resources: ["run-id", "pid:42"] },
           partialObservation: {
-            normalized_result: {
+            raw_result: {
               stdout: "captured owned output",
               output_truncated: true,
               completion_status: "unknown",
@@ -298,8 +298,8 @@ const registerSharedReverseEngineeringEdgeCasesPart3 = (): void => {
 
   it.each([
     ["ETIMEDOUT", "AnalysisTimeoutError"],
-    ["EACCES", "AnalysisAccessDeniedError"],
-    ["EPERM", "AnalysisAccessDeniedError"],
+    ["EACCES", "AnalysisCapabilityUnavailableError"],
+    ["EPERM", "AnalysisCapabilityUnavailableError"],
     ["ABORT_ERR", "AnalysisCancelledError"],
     ["unknown", "AnalysisCapabilityUnavailableError"],
   ])(
@@ -326,7 +326,14 @@ const registerSharedReverseEngineeringEdgeCasesPart3 = (): void => {
             cause: { message: "provider failure" },
             ...(code === "ETIMEDOUT" ? { timeoutMs: 120_000 } : {}),
             ...(code === "EACCES" || code === "EPERM"
-              ? { path: "objdump", systemCode: code }
+              ? {
+                  providerId: "objdump",
+                  diagnostics: {
+                    boundary: "provider-launch",
+                    command: "objdump",
+                    system_code: code,
+                  },
+                }
               : {}),
             ...(code === "unknown"
               ? {
@@ -367,7 +374,7 @@ const registerSharedReverseEngineeringEdgeCasesPart4 = (): void => {
       expect(changedResult).toMatchObject({
         ok: true,
         value: {
-          normalized_result: { artifact_changed: true },
+          raw_result: { artifact_changed: true },
           limitations: expect.arrayContaining([
             expect.stringContaining("may have changed"),
           ]),
@@ -382,10 +389,7 @@ const registerSharedReverseEngineeringEdgeCasesPart4 = (): void => {
       expect(removedResult).toMatchObject({
         ok: true,
         value: {
-          normalized_result: {
-            artifact_sha256_after: null,
-            artifact_changed: null,
-          },
+          raw_result: { artifact_sha256_after: null, artifact_changed: null },
           limitations: expect.arrayContaining([
             expect.stringContaining("post-run artifact digest"),
           ]),
@@ -397,7 +401,7 @@ const registerSharedReverseEngineeringEdgeCasesPart4 = (): void => {
   });
 
   it.each(["EACCES", "EPERM"] as const)(
-    "retains captured output on a permission-denied provider result (%s)",
+    "retains raw failure output on a permission-denied provider launch (%s)",
     async (code) => {
       const { directory, path } = await createArtifact();
       const service = new ReverseEngineeringService({
@@ -420,13 +424,17 @@ const registerSharedReverseEngineeringEdgeCasesPart4 = (): void => {
         expect(result).toMatchObject({
           ok: false,
           error: {
-            _tag: "AnalysisAccessDeniedError",
-            capturedOutput: {
+            _tag: "AnalysisCapabilityUnavailableError",
+            providerId: "objdump",
+            diagnostics: {
+              boundary: "provider-launch",
+              command: "objdump",
+              system_code: code,
+            },
+            cause: {
+              code,
               stdout: "partial provider output",
               stderr: "permission diagnostic",
-            },
-            partialObservation: {
-              normalized_result: { stdout: "partial provider output" },
             },
           },
         });
@@ -469,10 +477,7 @@ const registerSharedReverseEngineeringEdgeCasesPart5 = (): void => {
         error: {
           _tag: "AnalysisCancelledError",
           partialObservation: {
-            normalized_result: {
-              exit_code: null,
-              completion_status: "unknown",
-            },
+            raw_result: { exit_code: null, completion_status: "unknown" },
           },
         },
       });
@@ -676,7 +681,7 @@ const registerSharedReverseEngineeringEdgeCasesPart8 = (): void => {
       expect(result).toMatchObject({
         ok: true,
         value: {
-          normalized_result: {
+          raw_result: {
             stdout: "completed output",
             completion_status: "complete",
           },
@@ -736,7 +741,7 @@ const registerSharedReverseEngineeringEdgeCasesPart8 = (): void => {
       expect(result).toMatchObject({
         ok: true,
         value: {
-          normalized_result: {
+          raw_result: {
             stdout: "captured owned output",
             exit_code: null,
             completion_status: "unknown",
@@ -772,7 +777,7 @@ const registerSharedReverseEngineeringEdgeCasesPart9 = (): void => {
         error: {
           _tag: "AnalysisOutputError",
           partialObservation: {
-            normalized_result: {
+            raw_result: {
               stdout: "captured owned output",
               stderr: "diagnostic",
               exit_code: null,

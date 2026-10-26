@@ -127,18 +127,38 @@ register("list_classes", ({ offset, limit, query = "" }) => {
     const name = classes[nextOffset++];
     if (name.includes(query)) matching.push(name);
   }
-  return json({
+  const page = {
     scope: "top_level",
     total_classes: classes.length,
     next_offset: nextOffset,
     offset,
     limit,
     items: mode === "empty-page" ? [] : matching,
-  });
+    ...(mode === "search-audit-metadata"
+      ? {
+          fixture_metadata: {
+            page_offset: offset,
+            retained: "unknown page field",
+          },
+        }
+      : {}),
+  };
+  const response = json(page);
+  if (mode !== "search-audit-metadata") return response;
+  return {
+    ...response,
+    _meta: { fixture_envelope_offset: offset },
+    content: response.content.map((entry) => ({
+      ...entry,
+      annotations: { audience: ["user"], priority: 0.5 },
+      _meta: { fixture_content_offset: offset },
+    })),
+  };
 });
 register("get_class_summary", () =>
   json({
     full_name: mode === "wrong-class" ? "fixture.Other" : "fixture.Target",
+    raw_name: mode === "wrong-class" ? "fixture.Other" : "fixture.Target",
     name: "Target",
     method_count: mode === "summary-error" ? -1 : methods.length,
     field_count: 0,

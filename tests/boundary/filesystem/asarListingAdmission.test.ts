@@ -22,6 +22,7 @@ const archiveWith = async (bytes: Buffer) => {
 
 it("interrupts expanded listing admission between traversal batches", async () => {
   const controller = new AbortController();
+  const reason = Object.freeze({ requested: "listing-stop" });
   const header = {
     files: Object.fromEntries(
       Array.from({ length: 4000 }, (_, index) => [
@@ -32,8 +33,10 @@ it("interrupts expanded listing admission between traversal batches", async () =
   };
   const listing = readAsarListing(header, controller.signal);
   await setImmediate();
-  controller.abort();
-  await expect(listing).rejects.toMatchObject({ reason: "cancelled" });
+  controller.abort(reason);
+  const error: unknown = await listing.catch((caught: unknown) => caught);
+  expect(error).toMatchObject({ reason: "cancelled" });
+  expect((error as { cause?: unknown }).cause).toBe(reason);
 });
 
 it("rejects path expansion before publishing any inventory, preserving the input", async () => {
@@ -44,7 +47,7 @@ it("rejects path expansion before publishing any inventory, preserving the input
     reason: "limit",
     message: "ASAR expanded listing exceeds its 64 MiB representation budget",
   });
-  expect(await readFile(path)).toEqual(bytes);
+  expect(Buffer.compare(await readFile(path), bytes)).toBe(0);
 });
 
 it("reads deeply nested packed metadata without recursive listing or member lookup", async () => {
@@ -56,7 +59,12 @@ it("reads deeply nested packed metadata without recursive listing or member look
       count++;
       if (entry.kind === "file") {
         expect(entry.path).toBe(`${"d/".repeat(3500)}f0`);
-        expect(await buffer(await reader.open(entry))).toEqual(Buffer.alloc(0));
+        expect(
+          Buffer.compare(
+            await buffer(await reader.open(entry)),
+            Buffer.alloc(0),
+          ),
+        ).toBe(0);
       }
     }
     expect(count).toBe(3501);
@@ -120,10 +128,99 @@ it("preserves POSIX literal backslashes and rejects Windows component separators
       const entries = await list();
       expect(entries).toHaveLength(1);
       expect(entries[0]?.path).toBe("a\\b");
-      expect(await buffer(await reader.open(entries[0]!))).toEqual(
-        Buffer.alloc(0),
-      );
+      expect(
+        Buffer.compare(
+          await buffer(await reader.open(entries[0]!)),
+          Buffer.alloc(0),
+        ),
+      ).toBe(0);
     }
+  } finally {
+    await reader.close();
+  }
+});
+
+it.each([undefined, "01", "-1", "9007199254740992"])(
+  "retains inventory facts for an unreadable packed offset %s",
+  async (offset) => {
+    const digest = "a".repeat(64);
+    const bytes = asarHeaderBytes(
+      JSON.stringify({
+        files: {
+          member: {
+            size: 0,
+            ...(offset === undefined ? {} : { offset }),
+            executable: true,
+            integrity: { algorithm: "SHA256", hash: digest },
+          },
+        },
+      }),
+    );
+    const path = await archiveWith(bytes);
+    const reader = new AsarArtifactReader(path);
+    try {
+      const entries = [];
+      for await (const entry of reader.entries()) entries.push(entry);
+      expect(entries).toHaveLength(1);
+      const entry = entries[0]!;
+      expect(entry).toMatchObject({
+        path: "member",
+        kind: "file",
+        declaredSize: 0,
+        executable: true,
+        declaredIntegrity: { algorithm: "sha256", digest },
+      });
+      await expect(reader.open(entry)).rejects.toMatchObject({
+        reason: "format",
+      });
+      expect(Buffer.compare(await readFile(path), bytes)).toBe(0);
+    } finally {
+      await reader.close();
+    }
+  },
+);
+
+it("preserves directory and link priority with unrecognized integrity declarations", async () => {
+  const bytes = asarHeaderBytes(
+    JSON.stringify({
+      files: {
+        directory: {
+          files: {},
+          link: "target",
+          size: 3,
+          integrity: { algorithm: "SHA512", hash: "source-digest" },
+        },
+        link: {
+          link: "target",
+          size: 4,
+          offset: "invalid",
+          integrity: { algorithm: "SHA256", hash: "INVALID" },
+        },
+      },
+    }),
+  );
+  const path = await archiveWith(bytes);
+  const reader = new AsarArtifactReader(path);
+  try {
+    const entries = [];
+    for await (const entry of reader.entries()) entries.push(entry);
+    expect(entries).toMatchObject([
+      {
+        path: "directory",
+        kind: "directory",
+        declaredSize: 3,
+        declaredIntegrity: null,
+        limitations: [],
+      },
+      {
+        path: "link",
+        kind: "symlink",
+        declaredSize: 4,
+        declaredIntegrity: null,
+        limitations: ["ASAR symlink target was not followed or disclosed."],
+      },
+    ]);
+    expect(Buffer.compare(await readFile(path), bytes)).toBe(0);
   } finally {
     await reader.close();
   }

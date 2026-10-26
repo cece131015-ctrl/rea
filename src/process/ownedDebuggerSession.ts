@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { parseLinuxProcessStartTime } from "./ProcessOwnershipObservation.js";
+import { parseLinuxProcessStat } from "./LinuxProcessStat.js";
 
 /** Result of terminating one debugger process owned by this application. */
 export type OwnedDebuggerStopResult =
@@ -19,7 +19,10 @@ export interface OwnedInferiorIdentity {
 
 export type ProcessStartTimeReader = (pid: string) => Promise<string | null>;
 
-const readLinuxProcessStartTime: ProcessStartTimeReader = async (pid) => {
+/** Read one Linux identity; absence is distinct from unreadable or malformed data. */
+export const readLinuxProcessStartTime: ProcessStartTimeReader = async (
+  pid,
+) => {
   if (process.platform !== "linux")
     throw new Error(
       "Inferior process identity verification requires Linux /proc.",
@@ -37,10 +40,10 @@ const readLinuxProcessStartTime: ProcessStartTimeReader = async (pid) => {
       return null;
     throw cause;
   }
-  const startTime = parseLinuxProcessStartTime(stat);
-  if (startTime === undefined)
+  const parsed = parseLinuxProcessStat(stat);
+  if (parsed === undefined || parsed.pid !== Number(pid))
     throw new Error(`Inferior PID ${pid} has an unreadable process identity.`);
-  return startTime;
+  return parsed.startTime;
 };
 
 /** Confirm only that every previously identified inferior process has ended. */
@@ -230,7 +233,7 @@ export const stopOwnedDebuggerProcess = async (
     if (detached === undefined)
       return {
         status: "incomplete",
-        reason: `Owned ${debuggerName} inferior detach was not verified within ${DETACH_TIMEOUT_MS} ms.`,
+        reason: `Owned ${debuggerName} inferior detach was not verified within ${String(DETACH_TIMEOUT_MS)} ms. This release has no runtime override.`,
       };
     if (!isVerifiedDetachResult(detached)) {
       detachOutcomes.set(session, "unconfirmed");

@@ -42,6 +42,7 @@ describe("ZCode configuration paths", () => {
       displayName: "ZCode",
       configPath: join("/home/a", ".zcode", "cli", "config.json"),
       markerPath: join("/home/a", ".zcode", "cli"),
+      discoveryPaths: [join("/home/a", ".zcode", "cli")],
       format: "zcode",
       zcodeFallbackPath: join("/home/a", ".agents", "mcp.json"),
     });
@@ -270,8 +271,11 @@ describe("ZCode fallback uninstall", () => {
   };
 
   it.each(["comment", "trailing-comma", "bom"])(
-    "fails closed on strict fallback syntax: %s",
+    "edits the owner's dialect instead of ZCode's strict fallback syntax: %s",
     async (mode) => {
+      // ~/.agents/mcp.json is FreeBuff's own configuration, so FreeBuff's
+      // dialect decides whether it is editable. ZCode's stricter fallback view
+      // must not block a removal the file's owner can perform.
       const { home } = await zcodeClient();
       const valid = await writeFallback(home, {
         rea: owned,
@@ -285,13 +289,22 @@ describe("ZCode fallback uninstall", () => {
             : valid.replace(/\}\s*$/u, ",}");
       await writeFile(fallbackPath(home), original);
       const result = await runUninstall(false, systemUninstallHost(home));
+      expect(result.status).toBe("complete");
+      // The shared file is removed once and both of its clients report that.
       expect(result.items).toContainEqual(
-        expect.objectContaining({ name: "zcode", status: "failed" }),
+        expect.objectContaining({ name: "freebuff", status: "removed" }),
       );
-      expect(await readFile(fallbackPath(home), "utf8")).toBe(original);
-      await expect(
-        readFile(`${fallbackPath(home)}.rea.backup`),
-      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(
+        result.items
+          .find(({ name }) => name === "zcode")
+          ?.actions?.map(({ status }) => status),
+      ).toContain("removed");
+      const edited = await readFile(fallbackPath(home), "utf8");
+      expect(edited).not.toContain('"rea"');
+      expect(edited).toContain("other-server");
+      expect(await readFile(`${fallbackPath(home)}.rea.backup`, "utf8")).toBe(
+        original,
+      );
     },
   );
 
@@ -450,7 +463,13 @@ describe("ZCode disabled registrations", () => {
           environment: {},
         })
       ).find(({ client }) => client === "zcode");
-    expect(await statusFor()).toMatchObject({ state: "stale" });
+    // Native ZCode storage has a single reader, so setup drops the flag
+    // and is the working repair; doctor must keep recommending it.
+    expect(await statusFor()).toMatchObject({
+      state: "stale",
+      remediation: expect.stringContaining("rea setup"),
+    });
+    expect((await statusFor())?.remediation).not.toContain("enable: false");
 
     expect(
       (await configureClientConfiguration(client, {}, command)).status,
@@ -528,6 +547,9 @@ describe("ZCode disabled registrations", () => {
       config_path: fallback,
       command,
       state: "stale",
+      // The fallback view of shared storage is preserved by setup, so its
+      // disable is the manual conflict rather than a setup repair.
+      remediation: expect.stringContaining("enable: false"),
     });
   });
 

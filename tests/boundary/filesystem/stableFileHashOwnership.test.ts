@@ -8,7 +8,10 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { OwnedFileHandle } from "../../../src/filesystem/OwnedFileHandle.js";
 import * as regularFile from "../../../src/filesystem/RegularFile.js";
 import { RegularFileAdmissionFailure } from "../../../src/filesystem/RegularFile.js";
-import { hashStableFile } from "../../../src/filesystem/StableFileHash.js";
+import {
+  hashStableFile,
+  observeStableFile,
+} from "../../../src/filesystem/StableFileHash.js";
 import { LinuxHopperPublisher } from "../../../src/application/LinuxHopperPublisher.js";
 import {
   RegularFileCancelled,
@@ -16,6 +19,85 @@ import {
 } from "../../../src/filesystem/OwnedRegularFile.js";
 import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
 import type { VerifiedLinuxHopperPackage } from "../../../src/application/LinuxHopperPublisher.js";
+
+it("rejects a real extent change after admission instead of replacing its baseline", async () => {
+  const root = await createTestTempDirectory("rea-stable-admitted-extent-");
+  const path = join(root, "input.bin");
+  const original = Buffer.from("admitted extent");
+  await writeFile(path, original);
+  const nativeOpen = regularFile.openRegularFile;
+  let descriptor: regularFile.StableRegularFileDescriptor | undefined;
+  const open = vi
+    .spyOn(regularFile, "openRegularFile")
+    .mockImplementationOnce(async (...args) => {
+      descriptor = await nativeOpen(...args);
+      await writeFile(path, "a different and longer extent after admission");
+      return descriptor;
+    });
+  try {
+    const failure: unknown = await hashStableFile(path, {
+      retainFailedClose: () => {
+        throw new Error("Changed input descriptor must close successfully");
+      },
+    }).catch((cause: unknown) => cause);
+    expect(failure).toMatchObject({ _tag: "StableFileHashFailure" });
+    if (!(failure instanceof Error)) throw new Error("Expected changed input");
+    expect(failure.cause).toBeInstanceOf(regularFile.RegularFileChangedError);
+    expect(descriptor?.initial.size).toBe(original.length);
+    expect(descriptor?.handle.fd).toBe(-1);
+  } finally {
+    open.mockRestore();
+    if (descriptor !== undefined && descriptor.handle.fd >= 0)
+      await descriptor.handle.close();
+  }
+});
+
+it("captures a two-byte prefix across short reads and buffer reuse", async () => {
+  const root = await createTestTempDirectory("rea-stable-observation-prefix-");
+  const path = join(root, "script");
+  const bytes = Buffer.from("#!rest-of-file");
+  await writeFile(path, bytes);
+  const retained: OwnedFileHandle[] = [];
+  const originalOpen = regularFile.openRegularFile;
+  const open = vi
+    .spyOn(regularFile, "openRegularFile")
+    .mockImplementation(async (...args) => {
+      const descriptor = await originalOpen(...args);
+      const { handle } = descriptor;
+      const positional: {
+        read(
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ): Promise<{ bytesRead: number; buffer: Buffer }>;
+      } = handle;
+      const nativeRead = positional.read.bind(handle);
+      vi.spyOn(positional, "read").mockImplementation(
+        (buffer, offset, length, position) =>
+          nativeRead(
+            buffer,
+            offset,
+            position === 0 ? Math.min(length, 1) : length,
+            position,
+          ),
+      );
+      return descriptor;
+    });
+  try {
+    const observation = await observeStableFile(path, {
+      retainFailedClose: (owner) => retained.push(owner),
+    });
+    expect(observation).toMatchObject({
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes: bytes.length,
+      prefix: Buffer.from("#!"),
+    });
+  } finally {
+    open.mockRestore();
+    for (const owner of retained) if (owner.handle.fd >= 0) await owner.close();
+  }
+});
 
 it("adopts and retries the descriptor when hashing succeeded but close failed", async () => {
   const root = await createTestTempDirectory("rea-stable-hash-close-");
@@ -71,12 +153,13 @@ it("preserves a read cancellation cause when close also fails", async () => {
   const open = vi
     .spyOn(regularFile, "openRegularFile")
     .mockImplementation(async (selectedPath, options) => {
-      const handle = await nativeOpen(selectedPath, options);
+      const descriptor = await nativeOpen(selectedPath, options);
+      const { handle } = descriptor;
       vi.spyOn(handle, "stat").mockImplementationOnce(async () => {
         controller.abort(primary);
         throw primary;
       });
-      return handle;
+      return descriptor;
     });
   const originalClose = OwnedFileHandle.prototype.close;
   const close = vi
@@ -220,15 +303,10 @@ it("distinguishes a thrown undefined primary failure from a clean hash", async (
   const open = vi
     .spyOn(regularFile, "openRegularFile")
     .mockImplementation(async (selectedPath, options) => {
-      const handle = await openFileAtBoundary(selectedPath, options);
-      const originalStat = handle.stat.bind(handle);
-      let calls = 0;
-      vi.spyOn(handle, "stat").mockImplementation(async () => {
-        calls += 1;
-        if (calls === 2) throw undefined;
-        return originalStat();
-      });
-      return handle;
+      const descriptor = await openFileAtBoundary(selectedPath, options);
+      const { handle } = descriptor;
+      vi.spyOn(handle, "stat").mockRejectedValueOnce(undefined);
+      return descriptor;
     });
   const closeCause = new Error("injected close failure after undefined");
   const close = vi
@@ -404,9 +482,10 @@ it("tags a physical hash failure without inferring cancellation from a later sig
   const open = vi
     .spyOn(regularFile, "openRegularFile")
     .mockImplementation(async (selected, options) => {
-      const handle = await nativeOpen(selected, options);
+      const descriptor = await nativeOpen(selected, options);
+      const { handle } = descriptor;
       vi.spyOn(handle, "read").mockRejectedValueOnce(primary);
-      return handle;
+      return descriptor;
     });
   const nativeClose = OwnedFileHandle.prototype.close;
   const close = vi
@@ -447,12 +526,13 @@ it.each([false, true])(
     const open = vi
       .spyOn(regularFile, "openRegularFile")
       .mockImplementation(async (selected, options) => {
-        const handle = await nativeOpen(selected, options);
+        const descriptor = await nativeOpen(selected, options);
+        const { handle } = descriptor;
         vi.spyOn(handle, "read").mockImplementationOnce(async () => {
           controller.abort("cancelled at EOF");
           return { bytesRead: 0, buffer: Buffer.alloc(0) };
         });
-        return handle;
+        return descriptor;
       });
     const nativeClose = OwnedFileHandle.prototype.close;
     const close = vi.spyOn(OwnedFileHandle.prototype, "close");
@@ -498,11 +578,14 @@ it.each(
     const controller = new AbortController();
     const nativeOpen = regularFile.openRegularFile;
     let retained: OwnedFileHandle | undefined;
-    let handleSeen: Awaited<ReturnType<typeof nativeOpen>> | undefined;
+    let handleSeen:
+      | regularFile.StableRegularFileDescriptor["handle"]
+      | undefined;
     const open = vi
       .spyOn(regularFile, "openRegularFile")
       .mockImplementation(async (selected, options) => {
-        const handle = await nativeOpen(selected, options);
+        const descriptor = await nativeOpen(selected, options);
+        const { handle } = descriptor;
         handleSeen = handle;
         const read = handle.read.bind(handle);
         vi.spyOn(handle, "read").mockImplementationOnce(async (...args) => {
@@ -510,7 +593,7 @@ it.each(
           controller.abort(reason);
           return result;
         });
-        return handle;
+        return descriptor;
       });
     const nativeClose = OwnedFileHandle.prototype.close;
     const close = vi.spyOn(OwnedFileHandle.prototype, "close");
@@ -555,10 +638,11 @@ it.each(["physical", "completed"] as const)(
     const open = vi
       .spyOn(regularFile, "openRegularFile")
       .mockImplementation(async (selected, options) => {
-        const handle = await nativeOpen(selected, options);
+        const descriptor = await nativeOpen(selected, options);
+        const { handle } = descriptor;
         if (outcome === "physical")
           vi.spyOn(handle, "read").mockRejectedValueOnce(primary);
-        return handle;
+        return descriptor;
       });
     const nativeClose = OwnedFileHandle.prototype.close;
     let ownerSeen: OwnedFileHandle | undefined;

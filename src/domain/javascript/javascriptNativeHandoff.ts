@@ -4,19 +4,23 @@ import type {
   ApplicationEdge,
   ApplicationNode,
 } from "./javascriptApplicationGraphSchemas.js";
+import type { JavaScriptApplicationGraph } from "./javascriptApplicationGraph.js";
 import type { ApplicationFeatureTraceResult } from "./javascriptFeatureTraceSchemas.js";
 
 type NativeHandoff = ApplicationFeatureTraceResult["native_handoffs"][number];
 
 /** Build provider-neutral addon targets and link exact-subject native Evidence. */
 export const buildJavaScriptNativeHandoffs = (
-  nodes: readonly ApplicationNode[],
-  edges: readonly ApplicationEdge[],
+  graph: JavaScriptApplicationGraph,
+  selectedNativeNodeIds: ReadonlySet<string>,
   nativeEvidence: readonly Evidence[],
 ): NativeHandoff[] => {
   let nodeById: Map<string, ApplicationNode> | undefined;
-  return nodes
-    .filter(({ kind }) => kind === "native-addon")
+  return graph.nodes
+    .filter(
+      ({ kind, node_id }) =>
+        kind === "native-addon" && selectedNativeNodeIds.has(node_id),
+    )
     .flatMap((node) => {
       // Observations may describe only a containing archive. A native target
       // requires the node owner's exact byte identity, independently of its
@@ -27,9 +31,9 @@ export const buildJavaScriptNativeHandoffs = (
         ({ subject }) => subject?.digest.sha256 === digest,
       );
       nodeById ??= new Map(
-        nodes.map((candidate) => [candidate.node_id, candidate]),
+        graph.nodes.map((candidate) => [candidate.node_id, candidate]),
       );
-      const exportNodes = nativeExportNodes(node, edges, nodeById);
+      const exportNodes = nativeExportNodes(node, graph.edges, nodeById);
       return [
         {
           native_node_id: node.node_id,

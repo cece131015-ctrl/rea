@@ -1,19 +1,17 @@
 import { lstat, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { parseBinary } from "plist";
 import { z } from "zod";
 
-import { preflightPropertyListDecode } from "../artifacts/apple/InterfaceBuilderDecodeBudget.js";
+import { preflightPropertyListDecode } from "../artifacts/apple/PropertyListDecodeBudget.js";
+import { decodeBinaryPlistValue } from "../artifacts/apple/BinaryPlistMaterializer.js";
 import { BinaryTargetError } from "../domain/configurationErrors.js";
 import { isPathWithinRoot } from "../domain/localPath.js";
-import {
-  omitPrototypeKeys,
-  parseXmlPropertyList,
-} from "../domain/propertyListKeys.js";
+import { parseXmlPropertyList } from "../domain/propertyListKeys.js";
 import { decodeXmlPlistText } from "../domain/propertyListXmlText.js";
 import { hasBinaryPlistSignature } from "../domain/apple/appleArchiveFormat.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { absoluteCallerPath } from "../filesystem/callerPath.js";
 
 /** Decoded representation bound for one binary Info.plist. */
 const BINARY_PLIST_DECODE_BYTES = 16 * 1024 * 1024;
@@ -42,6 +40,18 @@ export interface ResolvedAppBundle {
   readonly infoPlist?: string;
 }
 
+/** Resource-only identity for an app directory; it is not a BinaryTarget. */
+export interface ResolvedAppBundleResourceRoot {
+  /** Path selected by the caller, retained even when it is a symlink alias. */
+  readonly callerPath: string;
+  /** Canonical directory whose resources are inspected. */
+  readonly canonicalPath: string;
+  readonly infoPlistPath: string;
+  readonly layout: "contents" | "root";
+  /** No executable was opened or hashed by resource-root discovery. */
+  readonly executableSha256: string | null;
+}
+
 /** Filesystem operations used by the resolver, injectable for boundary tests. */
 export interface AppBundleFileSystem {
   readonly readFile: (path: string) => Promise<Buffer>;
@@ -64,12 +74,16 @@ export const resolveAppBundleExecutable = async (
   try {
     const layout = await presentLayout(path);
     if (layout !== undefined)
-      return resolveLayoutExecutable(path, layout, fileSystem);
+      return await resolveLayoutExecutable(path, layout, fileSystem);
     const wrapped = await wrappedBundle(path);
     if (wrapped !== undefined) {
       const wrappedLayout = await presentLayout(wrapped);
       if (wrappedLayout !== undefined)
-        return resolveLayoutExecutable(wrapped, wrappedLayout, fileSystem);
+        return await resolveLayoutExecutable(
+          wrapped,
+          wrappedLayout,
+          fileSystem,
+        );
     }
   } catch (cause: unknown) {
     if (cause instanceof BinaryTargetError) return err(cause);
@@ -86,6 +100,65 @@ export const resolveAppBundleExecutable = async (
           "No Contents/Info.plist, root Info.plist, or single Wrapper/*.app bundle was found",
         ),
       },
+    ),
+  );
+};
+
+/**
+ * Resolve only the root and Info.plist layout needed for read-only resource
+ * inspection. This intentionally does not require or guess CFBundleExecutable.
+ */
+export const findAppBundleResourceRoot = async (
+  path: string,
+  options: { readonly cwd?: string } = {},
+): Promise<
+  Result<ResolvedAppBundleResourceRoot | undefined, BinaryTargetError>
+> => {
+  const callerPath = absoluteCallerPath(
+    path,
+    options.cwd === undefined ? {} : { cwd: options.cwd },
+  );
+  try {
+    const canonicalInput = await realpath(callerPath);
+    const directLayout = await presentLayout(canonicalInput);
+    const wrapped =
+      directLayout === undefined
+        ? await wrappedBundle(canonicalInput)
+        : undefined;
+    const root = wrapped ?? canonicalInput;
+    const layout = directLayout ?? (await presentLayout(root));
+    if (layout === undefined) return ok(undefined);
+    const canonicalPath = await realpath(root);
+    return ok({
+      callerPath,
+      canonicalPath,
+      infoPlistPath: join(canonicalPath, ...layout.plist),
+      layout: layout.plist[0] === "Contents" ? "contents" : "root",
+      executableSha256: null,
+    });
+  } catch (cause: unknown) {
+    if (cause instanceof BinaryTargetError) return err(cause);
+    return err(
+      new BinaryTargetError(callerPath, errorReason(cause, callerPath), {
+        cause,
+      }),
+    );
+  }
+};
+
+/** Require a discovered bundle layout while preserving typed read failures. */
+export const resolveAppBundleResourceRoot = async (
+  path: string,
+  options: { readonly cwd?: string } = {},
+): Promise<Result<ResolvedAppBundleResourceRoot, BinaryTargetError>> => {
+  const found = await findAppBundleResourceRoot(path, options);
+  if (!found.ok) return found;
+  if (found.value !== undefined) return ok(found.value);
+  const callerPath = absoluteCallerPath(path, options);
+  return err(
+    new BinaryTargetError(
+      callerPath,
+      `app resource root has no supported Info.plist layout: ${callerPath}`,
     ),
   );
 };
@@ -287,10 +360,8 @@ const parseBinaryPlistExecutable = (plist: Buffer): string =>
   executableName(parseBinaryPlistValue(plist));
 
 const parseBinaryPlistValue = (plist: Buffer): unknown => {
-  preflightPropertyListDecode(plist, BINARY_PLIST_DECODE_BYTES);
-  // `plist` assigns a `__proto__` key as the prototype; copying drops it, as
-  // the XML path does.
-  return omitPrototypeKeys(parseBinary(plist)).value;
+  const plan = preflightPropertyListDecode(plist, BINARY_PLIST_DECODE_BYTES);
+  return decodeBinaryPlistValue(plist, plan);
 };
 
 const isSafeExecutableName = (name: string): boolean =>

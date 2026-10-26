@@ -1,3 +1,4 @@
+import { MIMEType } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import { safeResponseMetadata } from "./CdpSafeMetadata.js";
@@ -65,6 +66,70 @@ describe("structured COOP and COEP declarations", () => {
         corp: null,
         x_content_type_options: null,
       });
+    },
+  );
+});
+
+describe("media type parameter preservation", () => {
+  it.each([
+    [
+      'Multipart/Mixed; boundary="AaB03x"',
+      'multipart/mixed; boundary="AaB03x"',
+    ],
+    [
+      'Application/LD+JSON; profile="https://api.example/Profiles/Book;V=One,Two"',
+      'application/ld+json; profile="https://api.example/Profiles/Book;V=One,Two"',
+    ],
+    [
+      'Application/X-Protobuf; type="Example.Message"',
+      'application/x-protobuf; type="Example.Message"',
+    ],
+  ])(
+    "preserves case-sensitive media type parameters in %s",
+    (raw, expected) => {
+      const linkType = raw.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+      const captured = safeResponseMetadata(
+        "request-media-type",
+        `${origin}/page`,
+        {
+          mimeType: `  ${raw}  `,
+          headers: {
+            "Content-Encoding": " GZip ",
+            Link: `</resource>; rel="PreLoad MCP"; type="${linkType}"; as=SCRIPT; crossorigin=ANONYMOUS`,
+          },
+        },
+        new Set([origin]),
+      );
+
+      for (const projected of [
+        captured.response.mime_type,
+        captured.response.links[0]?.type,
+      ]) {
+        expect(projected).toBe(expected);
+        expect([...new MIMEType(projected ?? "").params]).toEqual([
+          ...new MIMEType(raw).params,
+        ]);
+      }
+      expect(captured.response.content_encoding).toBe("gzip");
+      expect(captured.response.links).toMatchObject([
+        {
+          href: `${origin}/resource`,
+          destination_scope: "approved",
+          context_url: `${origin}/page`,
+          context_scope: "approved",
+          rel: ["preload", "mcp"],
+          as: "script",
+          crossorigin: "anonymous",
+        },
+      ]);
+      expect(captured.agentHints).toEqual([
+        {
+          mechanism: "link_rel",
+          declaration: "preload mcp",
+          url: `${origin}/resource`,
+          trust: "page-declared-untrusted",
+        },
+      ]);
     },
   );
 });
@@ -162,6 +227,20 @@ describe("safe CDP response metadata", () => {
     ]);
   });
 
+  it.each(["/.well-known/MCP", "/.WELL-KNOWN/mcp"])(
+    "does not case-fold a different well-known resource path: %s",
+    (path) => {
+      const captured = safeResponseMetadata(
+        "request-case-variant",
+        `${origin}${path}`,
+        { headers: {} },
+        new Set([origin]),
+      );
+      expect(captured.response.url).toBe(`${origin}${path}`);
+      expect(captured.agentHints).toEqual([]);
+    },
+  );
+
   it("retains every parsed header, CSP directive, link, relation, and policy feature", () => {
     const csp = Array.from(
       { length: 105 },
@@ -235,6 +314,37 @@ describe("safe CDP response metadata CSP sources", () => {
       },
     ]);
   });
+
+  it.each(["\n", "\r\n", ", "])(
+    "parses every policy of a repeated CSP field joined by %j",
+    (delimiter) => {
+      const captured = safeResponseMetadata(
+        "request-csp-repeated",
+        `${origin}/api`,
+        {
+          headers: {
+            "Content-Security-Policy": [
+              "default-src 'self'",
+              "script-src https://private.example.test; img-src data:",
+            ].join(delimiter),
+          },
+        },
+        new Set([origin]),
+      );
+
+      expect(captured.response.csp.directives).toEqual([
+        {
+          name: "default-src",
+          sources: [{ kind: "keyword", value: "'self'" }],
+        },
+        {
+          name: "script-src",
+          sources: [{ kind: "external_origin", value: null }],
+        },
+        { name: "img-src", sources: [{ kind: "scheme", value: "data:" }] },
+      ]);
+    },
+  );
 
   it("inherits the protected resource scheme for a scheme-less host source", () => {
     const captured = safeResponseMetadata(
@@ -371,6 +481,9 @@ describe("safe CDP response metadata referrer policy", () => {
     ["future-policy, no-referrer", "no-referrer"],
     ["unsafe-url, NO-REFERRER", "no-referrer"],
     ["origin,, no-referrer", "no-referrer"],
+    // CDP joins repeated field lines with LF.
+    ["no-referrer\nstrict-origin", "strict-origin"],
+    ["no-referrer\r\nfuture-policy", "no-referrer"],
     ["future-policy", null],
     ['unsafe-url, "no-referrer"', null],
     ["no-referrer; report-to=x, origin", null],
@@ -422,4 +535,60 @@ describe("safe CDP response metadata referrer policy", () => {
     );
     expect(captured.response.content_length).toBe(expected);
   });
+});
+
+describe("Link context identity and display", () => {
+  it.each([
+    [
+      "https://user:secret@app.example.test/page",
+      "/page",
+      true,
+      `${origin}/page`,
+      "approved",
+    ],
+    [
+      "https://user:secret@app.example.test/page",
+      "https://user:secret@app.example.test/page",
+      true,
+      `${origin}/page`,
+      "approved",
+    ],
+    [
+      `${origin}/page`,
+      "https://other:secret@app.example.test/page",
+      false,
+      `${origin}/page`,
+      "approved",
+    ],
+    [`${origin}/page`, "http://[", false, "http://[", "unsupported"],
+    ["http://[", "/page", false, "/page", "unsupported"],
+    [
+      `${origin}/page`,
+      "https://elsewhere.test/page",
+      false,
+      "https://elsewhere.test/page",
+      "outside_policy",
+    ],
+  ] as const)(
+    "preserves resolved context identity for response %s and anchor %s",
+    (responseUrl, anchor, matches, displayUrl, scope) => {
+      const captured = safeResponseMetadata(
+        "context",
+        `${origin}/page`,
+        {
+          url: responseUrl,
+          headers: { Link: `</agent>; rel=mcp; anchor="${anchor}"` },
+        },
+        new Set([origin]),
+      );
+      expect(captured.response.links[0]).toMatchObject({
+        context_url: displayUrl,
+        context_scope: scope,
+      });
+      expect(
+        captured.agentHints.filter(({ mechanism }) => mechanism === "link_rel"),
+      ).toHaveLength(matches ? 1 : 0);
+      expect(JSON.stringify(captured)).not.toContain("secret");
+    },
+  );
 });

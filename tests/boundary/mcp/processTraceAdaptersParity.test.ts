@@ -11,7 +11,7 @@ import { compareProcessEvidenceFiles } from "../../../src/application/process/Pr
 import { PROCESS_PROVIDER } from "../../../src/domain/process/processEvidenceProvider.js";
 import { processTraceCaptureFixture } from "../../../src/domain/process/processCapture.fixture.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
-import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
+
 import { createServer } from "../../../src/server/createServer.js";
 import { observed as ok } from "../../fixtures/analysisExecution.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -25,7 +25,7 @@ const captureEvidence = (side: "left" | "right") =>
     predicateType: "rea.process-capture",
     operation: "capture_process_scenario",
     parameters: { side },
-    result: jsonValueSchema.parse(capture),
+    result: capture,
     confidence: "observed",
     authority: "controlled-replay",
     locations: [{ kind: "artifact-path", path: `/fixture/${side}` }],
@@ -154,5 +154,59 @@ describe("declared trace adapter parity", () => {
     expect(text).toContain(message);
     expect(text.match(/first undeclared pair/g)).toHaveLength(1);
     await client.ping();
+  });
+
+  it("rejects a variant that only reorders unordered members through CLI and MCP", async () => {
+    const left = captureEvidence("left");
+    const right = captureEvidence("right");
+    const reorderedSpecification = {
+      ...traceSpecification,
+      language: {
+        kind: "finite_traces",
+        variants: [
+          {
+            id: "forward",
+            trace: ["before", { unordered: ["exit", "settlement"] }, "after"],
+          },
+          {
+            id: "reverse",
+            trace: ["before", { unordered: ["settlement", "exit"] }, "after"],
+          },
+        ],
+      },
+    };
+    const root = await createTestTempDirectory("rea-trace-duplicates-");
+    temporaryRoots.push(root);
+    const leftPath = join(root, "left.json");
+    const rightPath = join(root, "right.json");
+    const specificationPath = join(root, "trace.json");
+    await Promise.all([
+      writeFile(leftPath, JSON.stringify(left)),
+      writeFile(rightPath, JSON.stringify(right)),
+      writeFile(specificationPath, JSON.stringify(reorderedSpecification)),
+    ]);
+    const message = "finite trace variants must not duplicate a trace";
+    expect(
+      await compareProcessEvidenceFiles(leftPath, rightPath, specificationPath),
+    ).toMatchObject({
+      category: "invalid_input",
+      details: {
+        issues: [
+          { path: ["trace_spec", "language", "variants", 1, "trace"], message },
+        ],
+      },
+    });
+    const client = await comparisonClient(left, right);
+    const response = await client.callTool({
+      name: "compare_process_captures",
+      arguments: { left, right, trace_spec: reorderedSpecification },
+    });
+    expect(response.isError).toBe(true);
+    expect(
+      response.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n"),
+    ).toContain(message);
   });
 });

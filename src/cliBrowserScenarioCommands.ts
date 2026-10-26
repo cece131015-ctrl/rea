@@ -2,15 +2,20 @@ import { Cli } from "incur";
 import { z } from "zod";
 
 import { captureBrowserScenario } from "./application/BrowserScenarioCaptureService.js";
+import { finishAnalysisCommand } from "./cli/finishAnalysisCommand.js";
 import { withCommandCancellation } from "./cli/commandCancellation.js";
+import {
+  analysisEvidenceDeliveryOptions,
+  cliEvidenceDeliveryInputError,
+  publishCliAnalysisEvidence,
+} from "./cli/analysisEvidenceDelivery.js";
 import { CLI_COMMANDS } from "./cliCommandNames.js";
 import { parseCliJsonInput, resolveCliJsonPaths } from "./cliJsonInput.js";
 import { logCliCommand } from "./cliLogging.js";
-import { AnalysisError } from "./domain/analysisErrorBase.js";
 import { projectAnalysisError } from "./domain/analysisErrorProjection.js";
-import { BrowserObservationError } from "./domain/browserObservationError.js";
 import { analysisInputErrorFromIssues } from "./domain/inputIssueProjection.js";
 import { browserScenarioSchema } from "./domain/browserScenario.js";
+import type { BrowserScenarioCapturePort } from "./application/BrowserScenarioCapturePort.js";
 import type { JsonValue } from "./domain/jsonValue.js";
 import type { Logger } from "pino";
 
@@ -21,6 +26,11 @@ export const registerBrowserScenarioCommands = (
   cli: ReturnType<typeof Cli.create>,
   logger: Logger,
   environment: Readonly<Record<string, string | undefined>>,
+  options: {
+    readonly createProvider?: (
+      environment: Readonly<Record<string, string | undefined>>,
+    ) => BrowserScenarioCapturePort;
+  } = {},
 ): void => {
   cli.command(CLI_COMMANDS.captureBrowserScenario, {
     description:
@@ -30,10 +40,21 @@ export const registerBrowserScenarioCommands = (
         .string()
         .describe("Inline browser scenario JSON or JSON file path"),
     }),
-    run: ({ args }) =>
+    options: z.object(analysisEvidenceDeliveryOptions),
+    run: ({ args, options: delivery }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.captureBrowserScenario, async () => {
-          const input = await parseCliJsonInput(args.inputJson, OPERATION);
+          const deliveryError = cliEvidenceDeliveryInputError({
+            detail: delivery.detail,
+            evidenceOutput: delivery.evidence_output,
+            operation: OPERATION,
+          });
+          if (deliveryError !== undefined) return cliError(deliveryError);
+          const input = await parseCliJsonInput(
+            args.inputJson,
+            OPERATION,
+            signal,
+          );
           if (!input.ok) return input.error;
           const scenario = browserScenarioSchema.safeParse(
             resolveCliJsonPaths(input.value, [["browser", "executable_path"]]),
@@ -48,45 +69,35 @@ export const registerBrowserScenarioCommands = (
               ),
             );
           // Load Playwright only for this command, not during CLI startup.
-          const { createBrowserScenarioProvider } =
-            await import("./composition/browserScenario.js");
-          const provider = createBrowserScenarioProvider(environment);
-          let result:
-            | Awaited<ReturnType<typeof captureBrowserScenario>>
-            | undefined;
-          try {
-            result = await captureBrowserScenario(provider, scenario.data, {
-              signal,
-            });
-            return result.ok ? result.value : cliError(result.error);
-          } finally {
-            try {
-              await provider?.close?.();
-            } catch (cause: unknown) {
-              // Failed captures already retain their primary error and partial
-              // observations. A cleanup retry must not replace that outcome.
-              if (result?.ok)
-                throw new BrowserObservationError(OPERATION, "cleanup_failed", {
-                  cause,
-                  cleanup:
-                    cause instanceof AnalysisError &&
-                    cause.cleanup !== undefined
-                      ? cause.cleanup
-                      : {
-                          reason:
-                            cause instanceof Error
-                              ? cause.message
-                              : String(cause),
-                          resources:
-                            cause instanceof AnalysisError &&
-                            cause.cleanupResources.length > 0
-                              ? cause.cleanupResources
-                              : ["browser_transport"],
-                        },
-                  partialObservation: result.value,
-                });
-            }
-          }
+          const provider =
+            options.createProvider === undefined
+              ? await import("./composition/browserScenario.js").then(
+                  ({ createBrowserScenarioProvider }) =>
+                    createBrowserScenarioProvider(environment),
+                )
+              : options.createProvider(environment);
+          const result = await finishAnalysisCommand(
+            () => captureBrowserScenario(provider, scenario.data, { signal }),
+            {
+              close: async () => {
+                await provider?.close?.();
+              },
+            },
+            "rea-playwright-browser-scenario",
+            OPERATION,
+            signal,
+            undefined,
+            { failureProjection: "initial" },
+          );
+          if (!("evidence_id" in result))
+            return { error: "Browser scenario capture failed", ...result };
+          return publishCliAnalysisEvidence(result, {
+            providerId: "rea-playwright-browser-scenario",
+            operation: OPERATION,
+            signal,
+            detail: delivery.detail,
+            evidenceOutput: delivery.evidence_output,
+          });
         }),
       ),
   });

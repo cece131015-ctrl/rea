@@ -13,8 +13,8 @@ import type { ToolContract } from "./toolContractTypes.js";
 import { toolContractMetadata } from "./toolEffects.js";
 import { evidenceResultOf } from "./toolOutputSchemaPrimitives.js";
 
-/** Website mirror and clone contracts shared by CLI and MCP. */
-export const WEB_MIRROR_TOOL_CONTRACTS = [
+/** Website mirror contracts over saved captures, shared by CLI and MCP. */
+export const WEB_MIRROR_EXPORT_TOOL_CONTRACTS = [
   {
     name: "export_web_mirror",
     ...toolContractMetadata("export_web_mirror"),
@@ -33,6 +33,10 @@ export const WEB_MIRROR_TOOL_CONTRACTS = [
       },
     ],
   },
+] as const satisfies readonly ToolContract[];
+
+/** Live website clone contracts; they run the caller-selected browser. */
+export const WEBSITE_CLONE_TOOL_CONTRACTS = [
   {
     name: "clone_website",
     ...toolContractMetadata("clone_website"),

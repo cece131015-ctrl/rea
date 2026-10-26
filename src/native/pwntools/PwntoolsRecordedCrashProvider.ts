@@ -1,4 +1,7 @@
-import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import {
+  AnalysisCancelledError,
+  AnalysisOutputError,
+} from "../../domain/analysisErrorCore.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   recordedCrashPayloadSchema,
@@ -10,10 +13,12 @@ import type { RecordedCrashPort } from "../../application/binaryDiagnostics/Reco
 import { PrivateRuntimeRoot } from "../../process/PrivateRuntimeRoot.js";
 import { PwntoolsDecoder, type PwntoolsLauncher } from "./PwntoolsDecoder.js";
 import { PWNTOOLS_PROVIDER_IDENTITY } from "./PwntoolsRelease.js";
+import { validateCoreFileMappingAuthority } from "../pwndbg/CoreFileMappingAuthority.js";
 import { validateRecordedCrashSources } from "./RecordedCrashSourceBindings.js";
 import { validateRecordedCrashStructure } from "./RecordedCrashStructureBindings.js";
 import {
   inspectPwndbgCore,
+  pwndbgContextFinalizationFailure,
   recordedCrashStageOutput,
 } from "../pwndbg/PwndbgCoreContext.js";
 import type { z } from "zod";
@@ -52,6 +57,7 @@ export class PwntoolsRecordedCrashProvider
           diagnostics,
           options,
           runCommand,
+          timeoutMs,
         }) => {
           const validate = (debuggerContext: RecordedCrash["debugger"]) =>
             recordedCrashSchema.safeParse({
@@ -118,28 +124,45 @@ export class PwntoolsRecordedCrashProvider
             }
           if (!input.include_debugger_context) return value;
           try {
-            const context = await inspectPwndbgCore({
+            if (options?.signal?.aborted)
+              throw new AnalysisCancelledError("inspect_recorded_crash", {
+                cause: options.signal.reason,
+                capturedOutput: diagnostics,
+              });
+            const authority = validateCoreFileMappingAuthority(
+              value,
+              snapshot.bytes,
+            );
+            if (!authority.ok) throw authority.error;
+            const completed = await inspectPwndbgCore({
               environment,
+              architecture: value.architecture,
               rootPath,
               resources,
               diagnostics,
               options,
               runCommand,
+              timeoutMs,
             });
+            const context = completed.context;
             const enriched = validate(context);
             if (!enriched.success)
-              throw new AnalysisOutputError(
-                "inspect_recorded_crash",
-                `Recorded debugger context is invalid: ${enriched.error.issues[0]?.message ?? "schema mismatch"}`,
-                {
-                  capturedOutput:
-                    context.status === "available"
-                      ? recordedCrashStageOutput(
-                          diagnostics,
-                          context.diagnostics,
-                        )
-                      : diagnostics,
-                },
+              throw pwndbgContextFinalizationFailure(
+                new AnalysisOutputError(
+                  "inspect_recorded_crash",
+                  `Recorded debugger context is invalid: ${enriched.error.issues[0]?.message ?? "schema mismatch"}`,
+                  {
+                    capturedOutput: recordedCrashStageOutput(
+                      diagnostics,
+                      context.diagnostics,
+                    ),
+                  },
+                ),
+                completed.finalization,
+              );
+            if (completed.finalization !== undefined)
+              throw completed.finalization.retainPartialObservation(
+                enriched.data,
               );
             return enriched.data;
           } catch (cause: unknown) {

@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  AnalysisCleanupLeaseGroup,
+  type AnalysisCleanupLease,
+} from "../artifacts/AnalysisCleanupLease.js";
+import { bindArtifactFileCleanup } from "../artifacts/ArtifactFileOperation.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import {
@@ -8,26 +13,30 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { safeParseJson } from "../domain/safeJson.js";
-import {
-  WebCaptureExportError,
-  type WebCaptureExportErrorFactory,
-  type WebCaptureExportOperation,
+import type {
+  WebCaptureExportErrorFactory,
+  WebCaptureExportOperation,
 } from "../domain/webScriptExportError.js";
-import {
-  readRegularFile,
-  RegularFileCleanupFailure,
-  retryRegularFileCleanup,
-} from "./RegularFileRead.js";
 import {
   NonRegularFileReadError,
   RegularFileChangedError,
+  RegularFileOperationCancelled,
 } from "../filesystem/RegularFile.js";
+import {
+  RegularFileCleanupFailure,
+  regularFileCancellation,
+} from "../filesystem/OwnedRegularFile.js";
+import {
+  readRegularFile,
+  RegularFileReadFailure,
+  retryRegularFileCleanup,
+} from "./RegularFileRead.js";
 
 /** The publishing operation that owns a saved-capture read. */
 export interface WebCaptureReader<Selected> {
@@ -38,12 +47,18 @@ export interface WebCaptureReader<Selected> {
   readonly select: (json: unknown) => Selected;
 }
 
+type CaptureOwner = Pick<
+  WebCaptureReader<unknown>,
+  "operation" | "providerId" | "error"
+>;
+
 interface CaptureRead {
   readonly bytes: Buffer;
   readonly cleanup?: {
     readonly reason: string;
     readonly incomplete: boolean;
     readonly cause: unknown;
+    readonly lease?: AnalysisCleanupLease;
   };
 }
 
@@ -93,44 +108,49 @@ export const readSavedWebCapture = async <Selected>(
 /** Map a publication failure to the operation's typed error. */
 export const mapWebCaptureExportFailure = (
   cause: unknown,
-  reader: Pick<WebCaptureReader<unknown>, "operation" | "providerId" | "error">,
+  owner: CaptureOwner,
   paths: { readonly capturePath: string; readonly outputDirectory: string },
-  signal: AbortSignal | undefined,
 ): AnalysisError => {
-  if (cause instanceof WebCaptureExportError) return cause;
-  if (cause instanceof ArtifactReaderFailure && cause.cleanup !== undefined)
-    return analysisErrorWithCleanupFailure(
-      reader.error(cause.reason, paths.outputDirectory, cause.message, {
-        cause,
-      }),
+  if (cause instanceof AnalysisError) return cause;
+  if (cause instanceof ArtifactReaderFailure) {
+    const primary =
+      cause.cancellation === undefined
+        ? owner.error(cause.reason, paths.outputDirectory, cause.message, {
+            cause,
+            partialObservation: cause.partialObservation,
+          })
+        : new AnalysisCancelledError(owner.operation, {
+            cause: cause.cancellation.reason,
+            partialObservation: cause.partialObservation,
+          });
+    if (cause.cleanup === undefined) return primary;
+    const error = analysisErrorWithCleanupFailure(
+      primary,
       new ProviderCleanupError(
-        reader.providerId,
+        owner.providerId,
         cause.cleanup.resources,
         { reason: cause.cleanup.reason },
-        { cause, operation: reader.operation },
+        { cause, operation: owner.operation },
       ),
-      reader.operation,
+      owner.operation,
     );
-  if (signal?.aborted === true)
-    return new AnalysisCancelledError(reader.operation, { cause });
-  if (cause instanceof ArtifactReaderFailure)
-    return reader.error(cause.reason, paths.outputDirectory, cause.message, {
-      cause,
-    });
+    bindArtifactFileCleanup(cause, error);
+    return error;
+  }
   if (cause instanceof z.ZodError)
-    return new AnalysisOutputError(reader.operation, cause.message, { cause });
+    return new AnalysisOutputError(owner.operation, cause.message, { cause });
   if (
     cause instanceof Error &&
     "code" in cause &&
     typeof cause.code === "string"
   )
-    return reader.error(
+    return owner.error(
       "io",
       `${paths.capturePath} → ${paths.outputDirectory}`,
       cause.message,
       { cause },
     );
-  return new ProviderAdapterError(reader.providerId, reader.operation, {
+  return new ProviderAdapterError(owner.providerId, owner.operation, {
     cause,
     diagnostics: {
       capture_path: paths.capturePath,
@@ -152,48 +172,82 @@ export const mapWebCaptureExportFailure = (
  */
 const readCapture = async (
   path: string,
-  reader: WebCaptureReader<unknown>,
+  owner: CaptureOwner,
   resources: ArtifactResourceScope,
   signal: AbortSignal | undefined,
 ): Promise<Result<CaptureRead, AnalysisError>> => {
   try {
-    return ok({ bytes: await readRegularFile(path, { signal }) });
+    return ok({
+      bytes: await readRegularFile(path, {
+        signal,
+        cancellationFailure: (reason) =>
+          new RegularFileOperationCancelled(reason),
+      }),
+    });
   } catch (cause: unknown) {
-    if (signal?.aborted === true && cause === signal.reason)
-      return err(captureReadFailure(path, reader, cause, signal));
     if (cause instanceof RegularFileCleanupFailure) {
       const retry = await retryRegularFileCleanup(cause, resources, signal);
       const cleanup = {
         reason: retry.cleanup?.reason ?? errorMessage(cause.cleanupCause),
         incomplete: retry.cleanup !== undefined,
         cause: cause.cleanupCause,
+        ...(retry.cleanupLease === undefined
+          ? {}
+          : { lease: retry.cleanupLease }),
       };
-      if (retry.outcome.kind === "completed")
+      if (retry.outcome.kind === "completed") {
+        const cancellation =
+          signal?.aborted === true
+            ? { reason: signal.reason }
+            : regularFileCancellation(cause);
+        if (cancellation !== undefined) {
+          const primary = new AnalysisCancelledError(owner.operation, {
+            cause: cancellation.reason,
+          });
+          return err(
+            retry.cleanup === undefined
+              ? primary
+              : incompleteCaptureCleanup(primary, path, owner, cleanup),
+          );
+        }
         return ok({ bytes: retry.outcome.value as Buffer, cleanup });
+      }
       const primary = captureReadFailure(
         path,
-        reader,
-        retry.outcome.cause,
-        signal,
+        owner,
+        cause,
         retry.cleanup === undefined ? { cause: cause.cleanupCause } : undefined,
       );
       return err(
         retry.cleanup === undefined
           ? primary
-          : incompleteCaptureCleanup(primary, path, reader, cleanup),
+          : incompleteCaptureCleanup(primary, path, owner, cleanup),
       );
     }
-    return err(captureReadFailure(path, reader, cause, signal));
+    return err(captureReadFailure(path, owner, cause));
   }
 };
 
 const captureReadFailure = (
   path: string,
-  reader: WebCaptureReader<unknown>,
-  cause: unknown,
-  signal: AbortSignal | undefined,
+  owner: CaptureOwner,
+  failure: unknown,
   closeFailure?: { readonly cause: unknown },
 ): AnalysisError => {
+  const cancellation = regularFileCancellation(failure);
+  if (cancellation !== undefined)
+    return new AnalysisCancelledError(owner.operation, {
+      cause: cancellation.reason,
+    });
+  const primary =
+    failure instanceof RegularFileCleanupFailure &&
+    failure.outcome.kind === "failed"
+      ? (failure.operationFailure ?? failure.outcome.cause)
+      : failure;
+  const cause =
+    primary instanceof RegularFileReadFailure
+      ? primary.operationCause
+      : primary;
   const causeWithClose =
     closeFailure === undefined
       ? cause
@@ -202,14 +256,10 @@ const captureReadFailure = (
           "Capture read and file-handle close both failed",
           { cause },
         );
-  if (signal?.aborted === true)
-    return new AnalysisCancelledError(reader.operation, {
-      cause: causeWithClose,
-    });
   const code =
     cause instanceof Error && "code" in cause ? String(cause.code) : "";
   if (code === "EACCES" || code === "EPERM")
-    return new AnalysisAccessDeniedError(reader.operation, path, code, {
+    return new AnalysisAccessDeniedError(owner.operation, path, code, {
       cause: causeWithClose,
     });
   if (
@@ -220,7 +270,7 @@ const captureReadFailure = (
     code === "EISDIR" ||
     code === "ENXIO"
   )
-    return new AnalysisInputError(reader.operation, { cause: causeWithClose }, [
+    return new AnalysisInputError(owner.operation, { cause: causeWithClose }, [
       {
         path: ["capture_path"],
         reason: "invalid_value",
@@ -233,10 +283,10 @@ const captureReadFailure = (
       },
     ]);
   if (code !== "")
-    return reader.error("io", path, errorMessage(cause), {
+    return owner.error("io", path, errorMessage(cause), {
       cause: causeWithClose,
     });
-  return new ProviderAdapterError(reader.providerId, reader.operation, {
+  return new ProviderAdapterError(owner.providerId, owner.operation, {
     cause: causeWithClose,
     diagnostics: {
       capture_path: path,
@@ -249,19 +299,23 @@ const captureReadFailure = (
 const incompleteCaptureCleanup = (
   primary: AnalysisError,
   path: string,
-  reader: WebCaptureReader<unknown>,
+  owner: CaptureOwner,
   cleanup: NonNullable<CaptureRead["cleanup"]>,
-): AnalysisError =>
-  analysisErrorWithCleanupFailure(
+): AnalysisError => {
+  const error = analysisErrorWithCleanupFailure(
     primary,
     new ProviderCleanupError(
-      reader.providerId,
+      owner.providerId,
       [path],
       { reason: cleanup.reason },
-      { cause: cleanup.cause, operation: reader.operation },
+      { cause: cleanup.cause, operation: owner.operation },
     ),
-    reader.operation,
+    owner.operation,
   );
+  if (cleanup.lease !== undefined)
+    new AnalysisCleanupLeaseGroup(error, [cleanup.lease]);
+  return error;
+};
 
 const errorMessage = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);

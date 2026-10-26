@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { nativeInventoryRowsSchemas } from "../domain/native/nativeInventory.js";
 import type {
   AnalysisExecution,
   AnalysisOperation,
@@ -6,6 +6,10 @@ import type {
 import { AnalysisOutputError } from "../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { JsonValue } from "../domain/jsonValue.js";
+import {
+  parseContainingProcedureResolution,
+  type ContainingProcedureResolution,
+} from "../domain/hopperValues.js";
 import { err, ok, type Result } from "../domain/result.js";
 import type {
   EnhancedResult,
@@ -81,7 +85,6 @@ const literalMatches = async (
   signal?: AbortSignal,
 ): Promise<Result<{ matches: TraceMatch[] }, AnalysisError>> => {
   const matches: TraceMatch[] = [];
-  const matched = new Set<string>();
   for (const [tool, type] of sources) {
     const result = await call(
       tool,
@@ -93,9 +96,11 @@ const literalMatches = async (
       signal,
     );
     if (!result.ok) return result;
-    const items = z
-      .array(z.object({ address: z.string(), value: z.string() }))
-      .safeParse(result.value);
+    const items = (
+      type === "string"
+        ? nativeInventoryRowsSchemas.strings
+        : nativeInventoryRowsSchemas.names
+    ).safeParse(result.value);
     if (!items.success)
       return err(
         new AnalysisOutputError(
@@ -103,35 +108,15 @@ const literalMatches = async (
           "provider returned an invalid search result",
         ),
       );
-    addPageMatches({
-      items: items.data.map(({ address, value: name }) => ({
-        address,
-        name,
-      })),
-      type,
-      matches,
-      matched,
-    });
+    for (const item of items.data) {
+      matches.push(
+        type === "string"
+          ? { ...item, type: "string" }
+          : { ...item, type: "procedure" },
+      );
+    }
   }
   return ok({ matches });
-};
-
-const addPageMatches = (input: {
-  readonly items: readonly {
-    readonly address: string;
-    readonly name: string;
-  }[];
-  readonly type: TraceMatch["type"];
-  readonly matches: TraceMatch[];
-  readonly matched: Set<string>;
-}): void => {
-  const { items, type, matches, matched } = input;
-  for (const item of items) {
-    const key = `${type}\u0000${item.address}`;
-    if (matched.has(key)) continue;
-    matches.push({ type, address: item.address, value: item.name });
-    matched.add(key);
-  }
 };
 
 const traceReferences = async (
@@ -143,9 +128,13 @@ const traceReferences = async (
 > => {
   const references: TraceReference[] = [];
   const residual: string[] = [];
+  // References identify targets by address, independently of search alternatives.
+  const tracedTargets = new Set<string>();
   // A source address is resolved once however many matches reference it.
-  const containing = new Map<string, JsonValue>();
+  const containing = new Map<string, ContainingProcedureResolution>();
   for (const match of request.matches) {
+    if (tracedTargets.has(match.address)) continue;
+    tracedTargets.add(match.address);
     const observed = await observe(
       "xrefs",
       { address: match.address },
@@ -154,12 +143,10 @@ const traceReferences = async (
     if (!observed.ok) return observed;
     // Only an explicit producer report of truncation is a coverage gap; a
     // provider that reports nothing keeps its previous, unqualified result.
-    const unknown = `References to ${match.address} were truncated by the provider; additional references may exist.`;
-    if (
-      observed.value.referencesTruncated === true &&
-      !residual.includes(unknown)
-    )
-      residual.push(unknown);
+    if (observed.value.referencesTruncated === true)
+      residual.push(
+        `References to ${match.address} were truncated by the provider; additional references may exist.`,
+      );
     const sources = observed.value.result;
     if (!Array.isArray(sources))
       return err(
@@ -184,7 +171,9 @@ const traceReferences = async (
           request.signal,
         );
         if (!resolved.ok) return resolved;
-        containingProcedure = resolved.value;
+        const parsed = parseContainingProcedureResolution(resolved.value);
+        if (!parsed.ok) return parsed;
+        containingProcedure = parsed.value;
         containing.set(source, containingProcedure);
       }
       references.push({

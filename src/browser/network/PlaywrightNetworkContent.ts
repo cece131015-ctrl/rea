@@ -79,29 +79,32 @@ export const captureNetworkHeaders = async (
       options.signal,
     );
     let cost = 0;
+    const items: Extract<
+      BrowserNetworkHeaders,
+      { state: "captured" }
+    >["items"] = [];
     for (const { name, value } of headers) {
-      cost += secrets.redactionAllocationCost(name.length + value.length) + 128;
+      const credential = credentialHeaders.has(name.toLowerCase());
+      cost +=
+        secrets.redactionAllocationCost(
+          name.length + (credential ? 0 : value.length),
+        ) + 128;
       if (cost > options.maxHeaderAllocationBytes)
         return {
           state: "unavailable",
           message: `Headers exceed the ${String(options.maxHeaderAllocationBytes)}-byte allocation budget.`,
         };
+      const safeName = secrets.redact(name);
+      const safeValue = credential
+        ? null
+        : secrets.redactBytes(Buffer.from(value)).toString("utf8");
+      items.push({
+        name: safeName,
+        value: safeValue,
+        redacted: credential || safeName !== name || safeValue !== value,
+      });
     }
-    return {
-      state: "captured",
-      items: headers.map(({ name, value }) => {
-        const safeName = secrets.redact(name);
-        const credential = credentialHeaders.has(name.toLowerCase());
-        const safeValue = credential
-          ? null
-          : secrets.redactBytes(Buffer.from(value)).toString("utf8");
-        return {
-          name: safeName,
-          value: safeValue,
-          redacted: credential || safeName !== name || safeValue !== value,
-        };
-      }),
-    };
+    return { state: "captured", items };
   } catch (cause: unknown) {
     return {
       state: "unavailable",
@@ -177,6 +180,15 @@ export const captureNetworkBody = async (
     if (admission?.status === "omitted")
       return { state: "omitted", reason: admission.reason };
     const retained = secrets.redactBytes(observed);
+    if (retained.length > maxBodyBytes)
+      return {
+        state: "unavailable",
+        reason: "body-size-limit",
+        message:
+          "Secret redaction expanded the retained body beyond the selected byte limit.",
+        limit_bytes: maxBodyBytes,
+        observed_bytes: retained.length,
+      };
     return {
       state: "captured",
       representation:

@@ -308,8 +308,9 @@ describe("web capture dimension uncertainty", () => {
       changes: [expect.objectContaining({ change: "removed" })],
     });
     expect(result.dimensions.network).toMatchObject({
-      status: "changed",
-      changes: [expect.objectContaining({ change: "modified" })],
+      status: "unknown",
+      total_changes: 0,
+      changes: [],
     });
     expect(result.dimensions.webmcp).toMatchObject({
       status: "unknown",
@@ -1006,7 +1007,7 @@ describe("web capture diff incomplete inventories", () => {
       if (script === undefined) throw new Error("Missing captured script");
       script.url = `${script.url}?revision=2`;
       expect(compare(complete, modified).changes).toEqual([
-        expect.objectContaining({ change: "modified" }),
+        expect.objectContaining({ change: "added" }),
       ]);
     },
   );
@@ -1084,6 +1085,51 @@ describe("web capture diff semantics and fingerprints", () => {
       status: "changed",
       changes: [expect.objectContaining({ change: "added" })],
     });
+  });
+});
+
+it("keeps historical IndexedDB schema projections uncertain while retaining proven changes", async () => {
+  const browser = await startFakeCdpBrowser();
+  browsers.push(browser);
+  const current = await inspectStorage(browser, true);
+  const legacy = structuredClone(current);
+  const oldSchema = legacy.storage.content_fingerprints.find(
+    ({ scope }) => scope === "indexed_db_schema",
+  );
+  if (oldSchema === undefined)
+    throw new Error("Expected an IndexedDB schema fingerprint");
+  delete oldSchema.projection_version;
+  oldSchema.value_sha256 = "0".repeat(64);
+  for (const [before, after] of [
+    [legacy, current],
+    [current, legacy],
+  ] as const)
+    expect(compareStorage(before, after)).toMatchObject({
+      status: "unknown",
+      total_changes: 0,
+    });
+  expect(compareStorage(legacy, structuredClone(legacy))).toMatchObject({
+    status: "unknown",
+    total_changes: 0,
+  });
+  const changedLegacy = structuredClone(legacy);
+  const changedSchema = changedLegacy.storage.content_fingerprints.find(
+    ({ scope }) => scope === "indexed_db_schema",
+  );
+  if (changedSchema === undefined)
+    throw new Error("Expected an IndexedDB schema fingerprint");
+  changedSchema.value_sha256 = "1".repeat(64);
+  expect(compareStorage(legacy, changedLegacy)).toMatchObject({
+    status: "changed",
+    total_changes: 1,
+    changes: [expect.objectContaining({ change: "modified" })],
+  });
+  const changedKey = structuredClone(current);
+  changedKey.storage.local_storage_keys.push("new-key");
+  expect(compareStorage(legacy, changedKey)).toMatchObject({
+    status: "changed",
+    total_changes: 1,
+    changes: [expect.objectContaining({ change: "added" })],
   });
 });
 

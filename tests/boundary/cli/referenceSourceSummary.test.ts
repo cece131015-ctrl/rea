@@ -1,12 +1,11 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import canonicalize from "canonicalize";
 import { describe, expect } from "vitest";
 
-import {
-  createHistoricalSourceManifest,
-  parseHistoricalSourceGraph,
-} from "../../../src/domain/referenceSourceGraph.js";
+import { parseHistoricalSourceGraph } from "../../../src/domain/referenceSourceGraph.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
 
@@ -39,6 +38,25 @@ describe.skipIf(process.platform === "win32")(
         const complete = await run();
         expect(complete.exitCode).toBe(0);
         const graph = parseHistoricalSourceGraph(complete.json);
+        const graphJson = canonicalize(graph);
+        if (graphJson === undefined)
+          throw new TypeError("Unserializable complete graph");
+        const expectedSemantic = {
+          schema: "HistoricalSourceManifest",
+          authority: "historical-reference",
+          graph_sha256: createHash("sha256").update(graphJson).digest("hex"),
+          root_sha256: graph.root_sha256,
+          inventory_state: graph.inventory_state,
+          entry_count: 7,
+          relationship_count: 1,
+        };
+        const semanticJson = canonicalize(expectedSemantic);
+        if (semanticJson === undefined)
+          throw new TypeError("Unserializable manifest semantics");
+        const expectedManifest = {
+          ...expectedSemantic,
+          manifest_id: `hsm_${createHash("sha256").update(semanticJson).digest("hex")}`,
+        };
         expect((await run("--detail", "full")).stdout).toBe(complete.stdout);
         for (const depth of [undefined, 0, 1, 10]) {
           const result = await run(
@@ -47,6 +65,7 @@ describe.skipIf(process.platform === "win32")(
             ...(depth === undefined ? [] : ["--outline-depth", String(depth)]),
           );
           expect(result.exitCode).toBe(0);
+          expect(result.json).toHaveProperty("manifest", expectedManifest);
           const selected = graph.entries.filter(
             (entry) => entry.path.split("/").length <= (depth ?? 2),
           );
@@ -54,7 +73,6 @@ describe.skipIf(process.platform === "win32")(
             schema: "HistoricalSourceSummary",
             authority: graph.authority,
             root_alias: graph.root_alias,
-            manifest: createHistoricalSourceManifest(graph),
             inventory_state: graph.inventory_state,
             provenance: graph.provenance,
             vcs: graph.vcs,

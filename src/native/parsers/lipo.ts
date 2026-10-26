@@ -1,23 +1,30 @@
 import { z } from "zod";
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
+import { err, ok, type Result } from "../../domain/result.js";
+import type { NativeCommandCapture } from "../CommandRunner.js";
 import { machoCpuSubtypeBase } from "../../domain/apple/machoCpuIdentity.js";
 
 const architectureSchema = z.object({
   name: z.string().min(1),
+  hidden: z.boolean(),
   cpu_type: z.string().nullable(),
   cpu_subtype: z.string().nullable(),
-  cpu_type_code: z.number().int().nonnegative().nullable(),
-  cpu_subtype_code: z.number().int().nonnegative().nullable(),
-  cpu_subtype_base: z.number().int().nonnegative().nullable(),
+  cpu_type_code: z.int().nonnegative().nullable(),
+  cpu_subtype_code: z.int().nonnegative().nullable(),
+  cpu_subtype_base: z.int().nonnegative().nullable(),
   capabilities: z.string().nullable(),
-  file_offset: z.number().int().min(0).nullable(),
-  size: z.number().int().min(0).nullable(),
-  alignment: z.number().int().min(0).nullable(),
+  file_offset: z.int().min(0).nullable(),
+  size: z.int().min(0).nullable(),
+  alignment: z.int().min(0).nullable(),
 });
 
 export type LipoArchitecture = z.infer<typeof architectureSchema>;
 
 interface LipoOutput {
   readonly format: "thin" | "fat";
+  /** `nfat_arch` counts visible rows; Apple may append one hidden ARM64 row. */
+  readonly declaredArchitectureCount: number | null;
+  readonly hiddenArchitectureCount: number | null;
   readonly architectures: LipoArchitecture[];
 }
 
@@ -45,9 +52,12 @@ export const parseLipoOutput = (
   if (thinArchitecture !== undefined)
     return {
       format: "thin",
+      declaredArchitectureCount: null,
+      hiddenArchitectureCount: null,
       architectures: [
         architectureSchema.parse({
           name: thinArchitecture,
+          hidden: false,
           cpu_type: null,
           cpu_subtype: null,
           cpu_type_code: null,
@@ -61,6 +71,8 @@ export const parseLipoOutput = (
       ],
     };
   const architectures: LipoArchitecture[] = [];
+  let declaredArchitectureCount: number | null = null;
+  let hiddenArchitectureCount: number | null = null;
   let current: Record<string, string> | undefined;
   const flush = (): void => {
     if (current === undefined) return;
@@ -70,7 +82,8 @@ export const parseLipoOutput = (
         architectureSchema.parse({
           name: name.includes(" is architecture: ")
             ? (name.split(" is architecture: ").at(-1) ?? name)
-            : name,
+            : name.replace(/ \(hidden\)$/u, ""),
+          hidden: name.endsWith(" (hidden)"),
           cpu_type: current.cputype ?? null,
           cpu_subtype: current.cpusubtype ?? null,
           cpu_type_code: cpuTypeCode(current.cputype),
@@ -89,6 +102,12 @@ export const parseLipoOutput = (
   };
   for (const rawLine of output.split(/\r?\n/u)) {
     const line = rawLine.trim();
+    const count = /^nfat_arch\s+(\d+)(?:\s+\(\+(\d+) hidden\))?$/u.exec(line);
+    if (count?.[1] !== undefined) {
+      declaredArchitectureCount = integer(count[1]);
+      hiddenArchitectureCount = integer(count[2] ?? "0");
+      continue;
+    }
     if (line.startsWith("Non-fat file:")) {
       flush();
       current = { "Non-fat file": line };
@@ -111,7 +130,54 @@ export const parseLipoOutput = (
   flush();
   if (architectures.length === 0)
     throw new TypeError("lipo output contained no architectures");
-  return { format: "fat", architectures };
+  return {
+    format: "fat",
+    declaredArchitectureCount,
+    hiddenArchitectureCount,
+    architectures,
+  };
+};
+
+/** Classify expected lipo parse failures once for all command adapters. */
+export const parseLipoOutputResult = (
+  output: string,
+  operandPath?: string,
+): Result<LipoOutput, TypeError | z.ZodError> => {
+  try {
+    return ok(parseLipoOutput(output, operandPath));
+  } catch (cause: unknown) {
+    if (!(cause instanceof TypeError) && !(cause instanceof z.ZodError))
+      throw cause;
+    return err(cause);
+  }
+};
+
+/** Translate classified parse failure into native command output failure. */
+export const parseLipoCapture = (
+  capture: NativeCommandCapture,
+  operation: "inspect_macho" | "list_architectures",
+  operandPath: string,
+): Result<LipoOutput, AnalysisOutputError> => {
+  const parsed = parseLipoOutputResult(capture.stdout, operandPath);
+  if (parsed.ok) return parsed;
+  return err(
+    new AnalysisOutputError(
+      operation,
+      "lipo did not produce readable architecture records",
+      {
+        cause: parsed.error,
+        capturedOutput: {
+          stdout: capture.stdout,
+          stderr: capture.stderr,
+          truncated: false,
+          stdout_bytes: capture.stdoutBytes,
+          stderr_bytes: capture.stderrBytes,
+          exit_code: capture.exitCode,
+          signal: capture.signal,
+        },
+      },
+    ),
+  );
 };
 
 const integer = (value: string | undefined): number | null => {

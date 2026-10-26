@@ -18,6 +18,26 @@ const environment = () => ({
   HOPPER_LAUNCHER_PATH: "/rea-unconfigured-provider/hopper",
 });
 
+it("advertises the canonical observation duration bounds through the compiled CLI", async () => {
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    [entrypoint, "observe-web-execution", "--schema", "--json"],
+    { env: environment(), timeout: 20_000 },
+  );
+  expect(JSON.parse(stdout)).toMatchObject({
+    options: {
+      properties: {
+        observationMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 2_147_483_647,
+          default: 10_000,
+        },
+      },
+    },
+  });
+});
+
 it("runs the compiled public listener command through its default native CDP composition", async () => {
   const browser = await startRuntimeBrowser();
   onTestFinished(() => browser.close());

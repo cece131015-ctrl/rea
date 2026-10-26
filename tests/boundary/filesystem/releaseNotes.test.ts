@@ -107,6 +107,7 @@ beforeAll(async () => {
           author("claude"),
           author("cursoragent"),
           author("codex"),
+          author("Copilot"),
           author("morluto"),
         ]),
         associatedPullRequests: page([]),
@@ -235,14 +236,16 @@ it("inventories side branches and paginated credits, then checks and renders syn
     inventory.commits.flatMap(({ authors }) =>
       authors.map(({ user }) => user?.login),
     ),
-  ).toEqual(expect.arrayContaining(["claude", "cursoragent", "codex"]));
+  ).toEqual(
+    expect.arrayContaining(["claude", "cursoragent", "codex", "Copilot"]),
+  );
   expect(inventory.pullRequests.map((pr) => pr.number)).toEqual([101]);
   expect(f.record).toContain(
     "Thanks @alice, @bob, @reporter, @second-reporter.",
   );
   expect(f.record).toContain("Thanks @dana.");
   expect(f.record).not.toMatch(
-    /@(?:merger|automation|platformbot|claude|cursoragent|codex|morluto)/u,
+    /@(?:merger|automation|platformbot|claude|cursoragent|codex|Copilot|morluto)/u,
   );
   const body = join(f.directory, "body.md");
   await writeFile(
@@ -340,6 +343,7 @@ it("rejects lost grouped credits, fabricated references, bots, and stale PR bodi
       f.bullet + " Thanks @automation[bot].",
       "Unverified human credit @automation[bot]",
     ],
+    [f.bullet + " Thanks @Copilot.", "Unverified human credit @copilot"],
   ]) {
     await writeFile(
       join(f.directory, "CHANGELOG.md"),

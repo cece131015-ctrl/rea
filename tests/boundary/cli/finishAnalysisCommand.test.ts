@@ -21,6 +21,7 @@ it("preserves producer-owned cleanup failure when service close does not resolve
     { close: async () => {} },
     "fixture-provider",
     "inspect_web_page",
+    new AbortController().signal,
   );
 
   expect(result).toEqual(expected);
@@ -39,7 +40,6 @@ it("returns completed partial Evidence when cancellation arrives during close", 
     },
     "fixture-provider",
     "capture_browser_scenario",
-    undefined,
     controller.signal,
   );
 
@@ -61,7 +61,6 @@ it("preserves the primary operation error when cancellation arrives during close
     },
     "fixture-provider",
     "inspect_web_page",
-    undefined,
     controller.signal,
   );
 
@@ -70,6 +69,39 @@ it("preserves the primary operation error when cancellation arrives during close
     details: {
       reason: "primary failure",
       operation: "inspect_web_page",
+    },
+  });
+});
+
+it("retains late cancellation and completed Evidence when close also fails", async () => {
+  const evidence = scriptCaptureEvidenceFixture();
+  const controller = new AbortController();
+  const cleanup = new ProviderCleanupError(
+    "fixture-provider",
+    ["retained connection"],
+    { reason: "close failed" },
+  );
+  const result = await finishAnalysisCommand(
+    async () => ok(evidence),
+    {
+      close: async () => {
+        controller.abort({ during: "close" });
+        throw cleanup;
+      },
+    },
+    "fixture-provider",
+    "inspect_web_page",
+    controller.signal,
+  );
+  expect(result).toMatchObject({
+    code: "cleanup_incomplete",
+    category: "cancelled",
+    details: {
+      partial_observation: evidence,
+      diagnostics: {
+        primary_error: { code: "cancelled" },
+        cleanup_error: { details: { resources: ["retained connection"] } },
+      },
     },
   });
 });

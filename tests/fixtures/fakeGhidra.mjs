@@ -27,8 +27,52 @@ if (
   process.exit(64);
 }
 
+const OOME_LINE =
+  "ERROR Abort due to Headless analyzer error: Java heap space (HeadlessAnalyzer) java.lang.OutOfMemoryError: Java heap space\n";
+// Exceeds the 8 MiB diagnostic retention budget in many small chunks.
+const floodStdout = async () => {
+  const line = "INFO  fixture analyzer progress line\n";
+  const block = line.repeat(Math.ceil((64 * 1024) / line.length));
+  for (let written = 0; written < 10.5 * 1024 * 1024;) {
+    if (!process.stdout.write(block))
+      await new Promise((resolve) => process.stdout.once("drain", resolve));
+    written += block.length;
+  }
+};
+
+// The retention boundary ends exactly at the class-name prefix of a different identifier.
+const cutIdentifierAtBudget = async () => {
+  const marker = "java.lang.OutOfMemoryError";
+  let remaining = 8 * 1024 * 1024 - marker.length;
+  const block = Buffer.alloc(64 * 1024, 0x70);
+  while (remaining > 0) {
+    const part = block.subarray(0, Math.min(remaining, block.length));
+    if (!process.stdout.write(part))
+      await new Promise((resolve) => process.stdout.once("drain", resolve));
+    remaining -= part.length;
+  }
+  await new Promise((resolve, reject) =>
+    process.stdout.write(`${marker}Custom\n`, (error) =>
+      error ? reject(error) : resolve(),
+    ),
+  );
+  process.exit(74);
+};
+
+const writeThen = (stream, text, then) =>
+  stream.write(text, () => setTimeout(then, 10));
+
+if (mode === "remote_error" || mode === "remote_startup_error")
+  await new Promise((resolve) =>
+    process.stdout.write("Fixture launcher startup output\n", resolve),
+  );
+
+let endpointPublication;
 if (mode === "exit") process.exit(73);
-if (mode === "silent") setInterval(() => undefined, 1_000);
+if (mode === "flood_silent") {
+  await floodStdout();
+  setInterval(() => undefined, 1_000);
+} else if (mode === "silent") setInterval(() => undefined, 1_000);
 else {
   await rm(endpointPath, { force: true });
   const sockets = new Set();
@@ -64,7 +108,14 @@ else {
   });
   if (transport === "unix-socket") server.listen(endpointPath);
   else {
-    server.listen(0, "127.0.0.1", async () => {
+    endpointPublication = (async () => {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
       const address = server.address();
       if (address === null || typeof address === "string") process.exit(65);
       const pending = `${endpointPath}.pending`;
@@ -77,7 +128,7 @@ else {
         { flag: "wx" },
       );
       await rename(pending, endpointPath);
-    });
+    })();
   }
 }
 
@@ -102,6 +153,27 @@ const onSocketData = (socket, server, chunk, state) => {
     }
     handleRequest(socket, server, request, state);
   }
+};
+
+/** Tool-request failures that follow process output, as the Ghidra JVM prints them. */
+const handleOutputFailure = (socket, state) => {
+  const oome = () =>
+    writeThen(process.stderr, OOME_LINE, () => process.exit(1));
+  if (state.mode === "prefix_cut_identifier_exit_tools")
+    void cutIdentifierAtBudget();
+  else if (state.mode === "oom_exit_tools") oome();
+  else if (state.mode === "sigkill_tools")
+    writeThen(process.stdout, "WARN Decompiling 14005c790, pcode error\n", () =>
+      process.kill(process.pid, "SIGKILL"),
+    );
+  else if (state.mode === "flood_then_oom_exit_tools")
+    void floodStdout().then(oome);
+  else if (state.mode === "flood_then_exit_tools")
+    void floodStdout().then(() => process.exit(74));
+  else if (state.mode === "flood_then_malformed")
+    void floodStdout().then(() => socket.write("{invalid\n"));
+  else return false;
+  return true;
 };
 
 const handleRequest = (socket, server, request, state) => {
@@ -132,20 +204,33 @@ const handleRequest = (socket, server, request, state) => {
     return;
   }
   if (state.mode === "remote_error" && request.method === "list_procedures") {
-    socket.write(
-      `${JSON.stringify({
-        id: request.id,
-        ok: false,
-        error: {
-          code: "not_found",
-          message: "Unknown Ghidra procedure name",
-        },
-      })}\n`,
+    writeThen(
+      process.stdout,
+      "Fixture request rejected: missing procedure\n",
+      () =>
+        socket.write(
+          `${JSON.stringify({
+            id: request.id,
+            ok: false,
+            error: {
+              code: "not_found",
+              message: "Unknown Ghidra procedure name",
+            },
+          })}\n`,
+        ),
     );
     return;
   }
   if (state.mode === "exit_tools" && request.method !== "shutdown")
     process.exit(74);
+  if (
+    state.mode === "sigkill_after_first_tool" &&
+    request.method !== "shutdown" &&
+    (state.toolRequests = (state.toolRequests ?? 0) + 1) > 1
+  )
+    process.kill(process.pid, "SIGKILL");
+  if (request.method !== "shutdown" && handleOutputFailure(socket, state))
+    return;
   if (state.mode === "hang_tools" && request.method !== "shutdown") return;
   const inventory =
     request.method === "list_strings" && state.mode === "fragmented"
@@ -191,6 +276,19 @@ const handleRequest = (socket, server, request, state) => {
 };
 
 const handlePing = (socket, request, state) => {
+  if (state.mode === "remote_startup_error") {
+    socket.write(
+      `${JSON.stringify({
+        id: request.id,
+        ok: false,
+        error: {
+          code: "invalid_request",
+          message: "Fixture rejected startup handshake",
+        },
+      })}\n`,
+    );
+    return;
+  }
   state.pings.value += 1;
   if (state.mode === "diagnostic_output" && state.pings.value === 1) {
     const retainedTokenPrefixBytes = Math.floor(state.token.length / 2);
@@ -442,3 +540,5 @@ const stringSearchItem = () => ({
   address: "0x2000",
   value: "fixture value",
 });
+
+await endpointPublication;

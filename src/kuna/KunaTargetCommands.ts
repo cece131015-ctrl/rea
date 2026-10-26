@@ -291,7 +291,7 @@ export class KunaTargetCommands {
         this.lifetime.signal,
       );
       if (digest !== this.target.sha256)
-        return this.#workspaceFailure(
+        return await this.#workspaceFailure(
           new AnalysisArtifactChangedError(
             "kuna:workspace",
             this.target.path,

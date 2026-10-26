@@ -25,7 +25,11 @@ export interface HtmlAttributeValue {
   readonly quote: '"' | "'" | null;
 }
 
-/** A URL-bearing attribute, CSS text, or base declaration in one HTML document. */
+/**
+ * A URL-bearing attribute, CSS text, or base declaration in one HTML
+ * document. Base declarations come only from the document tree: a `<base>`
+ * inside template content never sets the document base URL.
+ */
 export type HtmlUrlReference =
   | (HtmlAttributeValue & {
       readonly kind: "url" | "srcset" | "base";
@@ -76,18 +80,36 @@ const SVG_URL_ELEMENTS = new Set(["image", "use", "feImage", "a", "script"]);
  */
 export const htmlUrlReferences = (text: string): HtmlUrlReference[] => {
   const references: HtmlUrlReference[] = [];
-  const pending: DefaultTreeAdapterTypes.Node[] = [
-    parse(text, { sourceCodeLocationInfo: true }),
+  // Reconstructing active formatting elements (an <a> or <font> left open
+  // across <p> or <li>) clones an element with its start tag's location; each
+  // source start tag is interpreted once.
+  const seenStartTags = new Set<number>();
+  const pending: {
+    readonly node: DefaultTreeAdapterTypes.Node;
+    readonly inTemplate: boolean;
+  }[] = [
+    {
+      node: parse(text, { sourceCodeLocationInfo: true }),
+      inTemplate: false,
+    },
   ];
   while (pending.length > 0) {
-    const node = pending.pop();
-    if (node === undefined) continue;
-    if (defaultTreeAdapter.isElementNode(node))
-      references.push(...elementReferences(text, node));
+    const entry = pending.pop();
+    if (entry === undefined) continue;
+    const { node, inTemplate } = entry;
+    if (defaultTreeAdapter.isElementNode(node)) {
+      const start = node.sourceCodeLocation?.startOffset;
+      if (start !== undefined && !seenStartTags.has(start)) {
+        seenStartTags.add(start);
+        references.push(...elementReferences(text, node, inTemplate));
+      }
+    }
     // Template content is a separate fragment; it still loads when used.
-    if ("content" in node) pending.push(node.content);
+    if ("content" in node)
+      pending.push({ node: node.content, inTemplate: true });
     if ("childNodes" in node)
-      for (const child of node.childNodes.toReversed()) pending.push(child);
+      for (const child of node.childNodes.toReversed())
+        pending.push({ node: child, inTemplate });
   }
   return references.sort((left, right) =>
     left.valueRange.start === right.valueRange.start
@@ -101,6 +123,7 @@ export const htmlUrlReferences = (text: string): HtmlUrlReference[] => {
 const elementReferences = (
   text: string,
   node: DefaultTreeAdapterTypes.Element,
+  inTemplate: boolean,
 ): HtmlUrlReference[] => {
   const location = node.sourceCodeLocation;
   if (location === undefined || location === null) return [];
@@ -133,7 +156,7 @@ const elementReferences = (
       references.push({ ...value, kind, siblingAttributes: siblings });
   };
   if (node.namespaceURI === HTML_NAMESPACE) {
-    if (node.tagName === "base") push("base", attribute("href"));
+    if (node.tagName === "base" && !inTemplate) push("base", attribute("href"));
     for (const name of URL_ATTRIBUTES[node.tagName] ?? [])
       push("url", attribute(name));
     for (const name of SRCSET_ATTRIBUTES[node.tagName] ?? [])

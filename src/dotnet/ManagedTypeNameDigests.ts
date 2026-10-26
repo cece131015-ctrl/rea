@@ -4,9 +4,10 @@ import { managedDecodeBudget } from "./ManagedDecodeBudget.js";
 import type { ManagedParseIssue } from "../domain/managed/managedArtifact.js";
 import type {
   parseTypes,
+  ManagedType,
   SignatureTypeName,
+  DeclarationTypeName,
 } from "./ManagedMemberInspectorCore.js";
-import { metadataToken } from "./ManagedMetadataHeaps.js";
 import type { ManagedTypeReferenceLookup } from "./ManagedTypeReferences.js";
 import type { ManagedMetadataLayout } from "./ManagedMetadataLayout.js";
 import { managedFailure, readManagedValue } from "./ManagedReaderFailure.js";
@@ -146,14 +147,17 @@ export const managedTypeNameDigests = (
   issues: ManagedParseIssue[],
   parsedTypes: Pick<ReturnType<typeof parseTypes>, "types" | "nesting">,
   reference: ManagedTypeReferenceLookup,
-): SignatureTypeName => {
+): {
+  readonly operand: SignatureTypeName;
+  readonly declaration: DeclarationTypeName;
+} => {
   const retain = () => managedDecodeBudget(layout).reserve(128, null);
   managedDecodeBudget(layout).reserve(parsedTypes.types.length * 128, null);
-  const types = new Map<string, (typeof parsedTypes.types)[number]>();
-  for (const type of parsedTypes.types) types.set(type.token, type);
+  const types = new Map<number, ManagedType>();
+  for (const { row, type } of parsedTypes.types) types.set(row, type);
   const definitions = nestedTypeDigests((row) => {
     if (!parsedTypes.nesting.complete) return null;
-    const type = types.get(metadataToken(TYPE_DEF, row));
+    const type = types.get(row);
     if (
       type === undefined &&
       (row < 1 || row > (layout.table(TYPE_DEF)?.rowCount ?? 0))
@@ -196,16 +200,28 @@ export const managedTypeNameDigests = (
     return value?.scopeValid === true ? value : null;
   }, retain);
   const digests = new Map<number, Buffer | null>();
-  return (codedIndex) => {
-    let digest = digests.get(codedIndex);
+  const digestFor = (
+    key: number,
+    table: number | undefined,
+    row: number,
+  ): Buffer | null => {
+    let digest = digests.get(key);
     if (digest === undefined) {
       managedDecodeBudget(layout).reserve(256, null);
-      const row = codedIndex >>> 2;
-      const table = codedIndex & 3;
       digest =
-        table === 0 ? definitions(row) : table === 1 ? references(row) : null;
-      digests.set(codedIndex, digest);
+        table === TYPE_DEF
+          ? definitions(row)
+          : table === TYPE_REF
+            ? references(row)
+            : null;
+      digests.set(key, digest);
     }
     return digest;
+  };
+  return {
+    operand: ({ value, coordinate }) =>
+      digestFor(value, coordinate.table, coordinate.row),
+    declaration: (table, row) =>
+      digestFor(row * 4 + Number(table === TYPE_REF), table, row),
   };
 };

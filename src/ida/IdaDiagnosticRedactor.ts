@@ -8,6 +8,10 @@ import {
   writeIdaDiagnostic,
   type IdaDiagnosticMatch,
 } from "./IdaDiagnosticWriter.js";
+import {
+  isIdaAuthenticationHeader,
+  idaExplicitSensitiveValues,
+} from "./IdaRegistrationIdentity.js";
 import type { IdaConfiguration } from "./IdaConfiguration.js";
 import { AnalysisProtocolError } from "../domain/analysisErrorCore.js";
 
@@ -151,8 +155,7 @@ export const createIdaDiagnosticRedactor = (
       ? Object.entries(config.headers)
       : [];
   const values = headers.flatMap(([name, value]) => {
-    if (!/^(?:authorization|proxy-authorization|cookie)$/iu.test(name))
-      return [];
+    if (!isIdaAuthenticationHeader(name)) return [];
     // Fetch normalizes surrounding HTTP whitespace before sending headers.
     const normalized = value.replace(/^[ \t\r\n]+|[ \t\r\n]+$/gu, "");
     if (normalized.length === 0) return [];
@@ -164,9 +167,13 @@ export const createIdaDiagnosticRedactor = (
         : authorizationPayloads(normalized)),
     ];
   });
-  const secrets = [...new Set(values.filter((value) => value.length > 0))].sort(
-    (left, right) => right.length - left.length,
-  );
+  const secrets = [
+    ...new Set(
+      [...values, ...idaExplicitSensitiveValues(config)].filter(
+        (value) => value.length > 0,
+      ),
+    ),
+  ].sort((left, right) => right.length - left.length);
   const replacement =
     secrets.length === 0 ? IDA_REDACTION_MARKER : redactionMarker(secrets);
   const alternatives = secrets

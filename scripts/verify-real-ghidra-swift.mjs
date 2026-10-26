@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { inspectGhidraInstallation } from "../dist/ghidra/GhidraInstallation.js";
+import { inspectVerifierGhidraInstallation } from "./lib/ghidra-installation-inspection.mjs";
 import { cleanupOwnedProcessGroup } from "../dist/process/ProcessOwnership.js";
 import {
   ProviderProcessSupervisor,
@@ -27,7 +27,7 @@ import { createVerifierRun, completeVerifierRun } from "./lib/verifier-run.mjs";
 
 const execute = promisify(execFile);
 const run = createVerifierRun();
-const installation = inspectGhidraInstallation({
+const installation = await inspectVerifierGhidraInstallation({
   environment: process.env,
   installDir: process.env.GHIDRA_INSTALL_DIR,
   javaHome: process.env.JAVA_HOME,
@@ -243,6 +243,7 @@ async function verifyStringLiterals() {
       assert(procedure, `${name} is missing from the procedure inventory`);
       const dossier = await call("analyze_function", {
         procedure: procedure.address,
+        detail: "complete",
       });
       const observed = dossier.swift_string_literals;
       assert(Array.isArray(observed), `${name} recorded no Swift literals`);
@@ -270,6 +271,7 @@ async function verifyStringLiterals() {
     );
     const unresolvedDossier = await call("analyze_function", {
       procedure: unresolvedJump.address,
+      detail: "complete",
     });
     assert.deepEqual(unresolvedDossier.swift_string_literals, []);
     assert.deepEqual(

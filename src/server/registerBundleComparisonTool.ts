@@ -5,10 +5,9 @@ import { readImmutableEvidenceBundle } from "../application/EvidenceBundleFiles.
 import { toolContract } from "../contracts/toolContracts.js";
 import { compareBundles } from "../domain/bundleComparison.js";
 import { createEvidence } from "../domain/evidence.js";
-import { jsonValueSchema } from "../domain/jsonValue.js";
 import { runDerivedOperation } from "./runDerivedOperation.js";
-import { recordSessionEvidenceSources } from "./sessionEvidence.js";
-import { BUNDLE_COMPARISON_PROVIDER } from "../application/InvestigationProviders.js";
+import { recordEvidenceSources } from "../application/investigation/recordEvidenceSources.js";
+import { BUNDLE_COMPARISON_PROVIDER } from "../domain/investigationProviders.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import { withAdmittedAnalysis } from "./analysisAdmission.js";
 import { runAdmittedToolOperation } from "./admittedToolOperation.js";
@@ -37,11 +36,13 @@ export const registerBundleComparisonTool = (
               input.left_bundle_path,
               context.mcpReq.signal,
               resources,
+              contract.name,
             ),
             readImmutableEvidenceBundle(
               input.right_bundle_path,
               context.mcpReq.signal,
               resources,
+              contract.name,
             ),
           ]);
           if (!left.ok) return server.delivery.toCallToolResult(left, contract);
@@ -63,7 +64,7 @@ export const registerBundleComparisonTool = (
               ]),
             ).values(),
           ];
-          const recordedSources = recordSessionEvidenceSources(
+          const recordedSources = recordEvidenceSources(
             (evidence) => session.recordEvidence(evidence),
             sourceRecords,
           );
@@ -80,7 +81,7 @@ export const registerBundleComparisonTool = (
                 right_bundle_sha256: comparison.right_bundle_sha256,
                 record_pairs: input.record_pairs,
               },
-              result: jsonValueSchema.parse(comparison),
+              result: comparison,
               confidence: "derived",
               authority: "analyst-inference",
               limitations: comparison.limitations,

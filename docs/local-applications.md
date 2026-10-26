@@ -24,7 +24,9 @@ third-party package mirrors are out of scope.
 | Windows  | Directories in `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%LOCALAPPDATA%\Programs`                                                                               |
 
 `search_roots` (CLI `--search-root`, repeatable) replaces the defaults; each
-entry may hold app bundles, desktop entries, AppImages or program directories.
+entry is an absolute directory (the CLI resolves relative ones against its
+working directory) that may hold app bundles, desktop entries, AppImages or
+program directories.
 Every searched location is reported as `scanned`, `missing`, `unreadable` or
 `truncated` (more than 10,000 entries), and coverage is `partial` when a location
 could not be read completely. Windows registry entries, Start Menu shortcuts and
@@ -56,14 +58,17 @@ libraries and data it loads from elsewhere are not included. Electron
 ## Copies
 
 `application` is an absolute path (bundle, directory, desktop entry or file) or
-a name. A name must select exactly one application: a single exact match, or a
+a name. The CLI treats an argument with a path separator, `.` or `..` as a path
+and anything else, including dot-prefixed names such as `.NET`, as a name. A name must select exactly one application: a single exact match, or a
 single match. Otherwise the call fails without writing and lists up to 20
 candidates; pass one candidate's path instead.
 
 Directories are copied by the artifact extraction owner: regular files only,
 symbolic links are neither followed nor recreated (their count is stated),
 every write is verified by SHA-256 and re-read, and failure or cancellation
-rolls the owned output back. A single file is digested, copied and re-verified.
+rolls the owned output back. A single file is digested, copied and re-verified
+the same way; cancellation is reported as cancelled, and a cleanup that cannot
+complete stays owned by the session and is reported with its residual path.
 The result reports the file count, bytes, a digest over the copied file set and
 analysis inputs, for example each copied `app.asar` for
 `analyze_javascript_application`. Settings, caches and data stored outside the

@@ -4,6 +4,20 @@ import {
   type SymbolicValue,
 } from "./javascriptSymbolicValues.js";
 
+/** Shared branch decision after each value lattice establishes truth/nullishness. */
+export const logicalRightOperand = (
+  operator: t.LogicalExpression["operator"],
+  truth: boolean | undefined,
+  nullish: boolean | undefined,
+): boolean | undefined =>
+  operator === "??"
+    ? nullish
+    : truth === undefined
+      ? undefined
+      : operator === "&&"
+        ? truth
+        : !truth;
+
 /** Whether short-circuit evaluation reaches the right operand; unknown stays unknown. */
 export const symbolicLogicalRight = (
   operator: t.LogicalExpression["operator"],
@@ -36,7 +50,7 @@ export const symbolicLogicalRight = (
       : undefined;
   }
   const truth = symbolicTruth(left);
-  return truth === undefined ? undefined : operator === "&&" ? truth : !truth;
+  return logicalRightOperand(operator, truth, undefined);
 };
 
 /** Only definite synchronous exits; unsupported control flow stays unknown. */

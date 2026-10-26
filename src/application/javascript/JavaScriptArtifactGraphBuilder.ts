@@ -1,17 +1,18 @@
 import { ELECTRON_IDENTITY_LIMITATION } from "../../domain/javascript/javascriptElectronMemberWrites.js";
 import type { ArtifactInventorySnapshot } from "../../domain/artifactInventorySnapshot.js";
 import {
-  createJavaScriptApplicationGraph,
   sealTransferredJavaScriptApplicationGraphSteps,
   type JavaScriptApplicationGraph,
 } from "../../domain/javascript/javascriptApplicationGraph.js";
-import type { JavaScriptModuleArtifactAnalysis } from "./JavaScriptArtifactAnalysisTypes.js";
+import type { JavaScriptArtifactAnalysis } from "./JavaScriptArtifactAnalysisTypes.js";
 import type { JavaScriptArtifactFileSet } from "../../domain/javascript/javascriptArtifactFiles.js";
 import { JavaScriptArtifactGraphAccumulator } from "./JavaScriptArtifactGraphAccumulator.js";
 import {
   HTML_INLINE_SCRIPT_LOCATION_COVERAGE_LIMIT,
   omittedHtmlInlineScriptLocations,
   selfReferenceOmissions,
+  dependencyManifest,
+  applicationContainerIdentity,
   type JavaScriptArtifactGraphContext,
 } from "./JavaScriptArtifactGraphContext.js";
 import {
@@ -48,18 +49,6 @@ import {
   collectElectronIpcRecords,
 } from "./ElectronBoundaryAnalysis.js";
 
-/** Project artifact and AST facts into JavaScript Application Graph. */
-export const buildJavaScriptArtifactGraph = (
-  snapshot: ArtifactInventorySnapshot,
-  fileSet: JavaScriptArtifactFileSet,
-  analysis: JavaScriptModuleArtifactAnalysis,
-): JavaScriptApplicationGraph =>
-  createJavaScriptApplicationGraph(
-    completeSynchronously(
-      buildJavaScriptArtifactGraphInputSteps(snapshot, fileSet, analysis),
-    ),
-  );
-
 /**
  * Build a validated application graph with cooperative immutable ownership.
  * Constructing the graph input also runs in steps: projecting every module
@@ -68,7 +57,7 @@ export const buildJavaScriptArtifactGraph = (
 export function* buildImmutableJavaScriptArtifactGraphSteps(
   snapshot: ArtifactInventorySnapshot,
   fileSet: JavaScriptArtifactFileSet,
-  analysis: JavaScriptModuleArtifactAnalysis,
+  analysis: JavaScriptArtifactAnalysis,
 ): Generator<void, JavaScriptApplicationGraph> {
   const input = yield* buildJavaScriptArtifactGraphInputSteps(
     snapshot,
@@ -79,20 +68,64 @@ export function* buildImmutableJavaScriptArtifactGraphSteps(
   return yield* sealTransferredJavaScriptApplicationGraphSteps(input);
 }
 
-const completeSynchronously = <Value>(steps: Iterator<void, Value>): Value => {
-  for (;;) {
-    const step = steps.next();
-    if (step.done === true) return step.value;
-  }
-};
-
 function* buildJavaScriptArtifactGraphInputSteps(
   snapshot: ArtifactInventorySnapshot,
   fileSet: JavaScriptArtifactFileSet,
-  analysis: JavaScriptModuleArtifactAnalysis,
+  analysis: JavaScriptArtifactAnalysis,
 ): Generator<void, unknown> {
   const accumulator = new JavaScriptArtifactGraphAccumulator();
   const root = createJavaScriptArtifactRootNode(accumulator, snapshot);
+  const parsedPackages = new Set(
+    analysis.packages
+      .filter((metadata) => metadata.status === "included")
+      .map(({ path }) => path),
+  );
+  const applicationOwnershipUnknownContainers = new Set<string>();
+  const applicationModuleGapSources = new Map<string, Set<string>>();
+  const applicationModuleReferencesRetained = new Set<string>();
+  const recordModuleGap = (file: {
+    path: string;
+    container_sha256: string;
+  }) => {
+    const container = applicationContainerIdentity(fileSet, file);
+    const sources =
+      applicationModuleGapSources.get(container) ?? new Set<string>();
+    sources.add(file.path);
+    applicationModuleGapSources.set(container, sources);
+  };
+  for (const files of [fileSet.files, fileSet.unavailable_relevant_files]) {
+    for (const file of files) {
+      if (
+        file.kind === "package-json" &&
+        !dependencyManifest(file.path) &&
+        !parsedPackages.has(file.path)
+      )
+        applicationOwnershipUnknownContainers.add(
+          applicationContainerIdentity(fileSet, file),
+        );
+      if (
+        file.kind === "javascript" &&
+        (!("text" in file) || !file.text.included)
+      )
+        recordModuleGap(file);
+    }
+  }
+  // Omitted module relationships can hide another launch owner. Do not expand
+  // retained facts beyond the projection guard merely to recover ownership.
+  for (const analyzed of analysis.files) {
+    if (
+      analyzed.application_projection_failure !== undefined ||
+      analyzed.analysis_failure !== undefined ||
+      analyzed.javascript?.parse_status === "failed" ||
+      (analyzed.javascript?.parse_error_count ?? 0) > 0
+    )
+      recordModuleGap(analyzed.file);
+    else if (analyzed.javascript !== null)
+      applicationModuleReferencesRetained.add(analyzed.file.path);
+  }
+  const unavailableFilesByPath = new Map(
+    fileSet.unavailable_relevant_files.map((file) => [file.path, file]),
+  );
   const context: JavaScriptArtifactGraphContext = {
     accumulator,
     snapshot,
@@ -105,13 +138,24 @@ function* buildJavaScriptArtifactGraphInputSteps(
     ),
     root,
     filesByPath: new Map(fileSet.files.map((file) => [file.path, file])),
-    unanalyzedFiles: fileSet.unanalyzed_files,
+    unanalyzedFiles: {
+      coverage: snapshot.coverage,
+      get: (path) =>
+        unavailableFilesByPath.get(path) ?? fileSet.unanalyzed_files?.get(path),
+      hasDirectory: (path, container) =>
+        fileSet.unanalyzed_files?.hasDirectory(path, container) ?? false,
+    },
     fileNodes: new Map(),
     assetNodes: new Map(),
     sourceModuleNodes: new Map(),
     chunkNodes: new Map(),
     moduleNodes: new Map(),
     containerNodes: new Map([[snapshot.manifest.root_sha256, root]]),
+    applicationRootsBySource: new Map(),
+    applicationOwnershipUnknownContainers,
+    applicationModuleGapSources,
+    applicationModuleReferencesRetained,
+    applicationPossibleRootsByContainer: new Map(),
   };
   addJavaScriptArtifactContainers(context);
   yield;
@@ -177,6 +221,7 @@ const graphCoverage = (context: JavaScriptArtifactGraphContext) => {
       javascript !== null && javascript.parse_status === "partial",
   );
   const unknownGap =
+    context.snapshot.coverage.status !== "complete" ||
     (context.fileSet.source_selection?.unselected_files ?? 0) > 0 ||
     context.fileSet.unavailable_relevant_files.length > 0 ||
     context.analysis.files.some(
@@ -268,11 +313,12 @@ const graphLimitations = (
   );
   return [
     ...context.analysis.limitations,
-    ...(context.fileSet.source_selection === undefined
+    ...((context.fileSet.source_selection?.unselected_files ?? 0) === 0
       ? []
       : [
-          `Caller-selected source analysis leaves ${String(context.fileSet.source_selection.unselected_files)} inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.`,
+          `Caller-selected source analysis leaves ${String(context.fileSet.source_selection?.unselected_files)} inventoried files outside analysis scope. Inventory identity covers the complete artifact; relationships through unselected sources remain unknown.`,
         ]),
+    ...context.snapshot.limitations,
     ...context.snapshot.integrity_contradictions.map(
       ({ logical_path: path }) =>
         `Artifact integrity metadata contradicts observed bytes at ${path}; the observed bytes are untrusted.`,

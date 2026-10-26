@@ -1,40 +1,119 @@
-interface ParsedDyldSymbol {
-  readonly name: string;
+interface ParsedDyldSymbolFields {
   readonly address: string | null;
   readonly weak: boolean | null;
   readonly reexport: boolean | null;
   readonly source: string | null;
+}
+
+interface ParsedDyldImport extends ParsedDyldSymbolFields {
+  readonly name: string | null;
+  /** Producer text when name, flags, library, or addend boundaries are unknown. */
+  readonly raw_name: string | null;
+  readonly name_status: "exact" | "ambiguous";
+  readonly addend: string | null;
+}
+
+interface ParsedDyldExport extends ParsedDyldSymbolFields {
+  readonly name: string;
   /** The source library's name for a symbol it re-exports under another name. */
   readonly sourceSymbol?: string;
 }
 
-/** Decode Apple dyld inventory rows, projecting export offsets to VM addresses. */
-export const parseDyldSymbols = (
+/** Decode Apple's literal import framing; request nm facts for competing names. */
+export const parseDyldImports = (
   output: string,
-  mode: "imports" | "exports",
-  imageBase: string | null = null,
-  knownExportNames: ReadonlySet<string> = new Set(),
-) => {
+  hasChainedFixups: boolean,
+  knownImportNames?: ReadonlySet<string>,
+): {
+  readonly items: ParsedDyldImport[];
+  readonly needsNameInventory: boolean;
+} => {
+  let needsNameInventory = false;
+  const items = output
+    .split("\n")
+    .flatMap<ParsedDyldImport>((rawLine, index) => {
+      const framed = rawLine.startsWith("      ");
+      const line = framed ? rawLine.slice(6) : rawLine;
+      if (
+        line.length === 0 ||
+        line.trim() === "-imports:" ||
+        (index === 0 && line.endsWith(":"))
+      )
+        return [];
+      // Apple prints "%s %s (from %s)": even an empty weak flag has its
+      // own separating spaces. Whitespace inside the name remains payload.
+      // Chained rows have one space after the ordinal in current Apple source,
+      // but two in installed-tool captures. nm names establish that boundary.
+      const ordinal = hasChainedFixups ? /^0x[\da-f]+ /iu.exec(line) : null;
+      const row = ordinal === null ? line : line.slice(ordinal[0].length);
+      const starts =
+        ordinal !== null && row.startsWith(" ") ? [row, row.slice(1)] : [row];
+      const readings: { name: string; weak: boolean | null; source: string }[] =
+        [];
+      for (const start of starts)
+        for (const separator of start.matchAll(
+          / (?:\[weak-import\])? \(from /gu,
+        )) {
+          const source = start.slice(separator.index + separator[0].length, -1);
+          if (!start.endsWith(")") || source.length === 0) continue;
+          const name = start.slice(0, separator.index);
+          if (name.length === 0) continue;
+          readings.push({
+            name,
+            weak: separator[0].includes("[weak-import]") ? true : null,
+            source,
+          });
+        }
+      if (readings.length > 1 && knownImportNames === undefined)
+        needsNameInventory = true;
+      const matching =
+        readings.length > 1 && knownImportNames !== undefined
+          ? readings.filter(({ name }) => knownImportNames.has(name))
+          : readings;
+      const reading = matching.length === 1 ? matching[0] : undefined;
+      const ambiguousSuffix =
+        reading !== undefined &&
+        hasChainedFixups &&
+        /\+0x[\da-f]+$/iu.test(reading.name);
+      const unknownName =
+        !framed ||
+        (hasChainedFixups && ordinal === null) ||
+        reading === undefined;
+      // Prefix uncertainty need not erase a separately established flag/library.
+      const common = readings.every(
+        (candidate) =>
+          candidate.weak === readings[0]?.weak &&
+          candidate.source === readings[0]?.source,
+      )
+        ? readings[0]
+        : undefined;
+      return [
+        {
+          name: unknownName || ambiguousSuffix ? null : reading.name,
+          raw_name: unknownName ? line : ambiguousSuffix ? reading.name : null,
+          name_status: unknownName || ambiguousSuffix ? "ambiguous" : "exact",
+          addend: null,
+          address: null,
+          weak: (reading ?? common)?.weak ?? null,
+          reexport: null,
+          source: (reading ?? common)?.source ?? null,
+        },
+      ];
+    });
+  return { items, needsNameInventory };
+};
+
+/** Decode Apple dyld export rows, projecting export offsets to VM addresses. */
+export const parseDyldExports = (
+  output: string,
+  imageBase: string | null,
+  knownExportNames: ReadonlySet<string>,
+): ParsedDyldExport[] => {
   const offsets = /^\s*offset\s+symbol\s*$/mu.test(output);
-  return output.split(/\r?\n/u).flatMap<ParsedDyldSymbol>((rawLine) => {
-    const line = rawLine.trim();
-    if (mode === "imports") {
-      const imported =
-        /^(?:0x[\da-f]+\s+)?(.+?)(?:\s+\[([^\]]+)\])?\s+\(from (.+)\)$/iu.exec(
-          line,
-        );
-      if (imported?.[1] !== undefined)
-        return [
-          {
-            name: imported[1],
-            address: null,
-            weak: /\bweak-import\b/u.test(imported[2] ?? "") ? true : null,
-            reexport: null,
-            source: imported[3] ?? null,
-          },
-        ];
-      return [];
-    }
+  // dyld_info ends rows with LF. A carriage return before it belongs to the
+  // symbol name, so export rows keep their trailing text.
+  return output.split("\n").flatMap<ParsedDyldExport>((rawLine) => {
+    const line = rawLine.trimStart();
     // dyld_info prints `_sym (from lib)`, or `_new (_old from lib)` when the
     // source library names the symbol differently. Split the trailing
     // parenthesized suffix with string scans so a library path containing
@@ -54,9 +133,9 @@ export const parseDyldSymbols = (
             : { sourceSymbol: reexport.sourceSymbol }),
         },
       ];
-    const exported = /^(0x[\da-f]+)\s+(.+?)(?:\s+\[([^\]]+)\])?$/iu.exec(line);
+    const exported = /^(0x[\da-f]+)\s+(.+?)(?:\s+\[([^\]]+)\])?$/isu.exec(line);
     if (exported?.[1] === undefined || exported[2] === undefined) return [];
-    const rawName = /^0x[\da-f]+\s+(.+)$/iu.exec(line)?.[1];
+    const rawName = /^0x[\da-f]+\s+(.+)$/isu.exec(line)?.[1];
     const literalName = rawName !== undefined && knownExportNames.has(rawName);
     // If nm establishes both interpretations, the textual row cannot bind an address or flags.
     // Let the caller retain the exact nm names without guessing which one owns this row.

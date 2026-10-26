@@ -17,11 +17,13 @@ Open `index.html` in the output directory to browse the copy.
 
 ## What a clone does
 
-`clone_website` launches the caller-selected Chrome or Chromium-family
-executable (`browser_executable_path`, CLI `--browser`, or
-`REA_BROWSER_EXECUTABLE`) with an owned temporary profile, loads the URL, waits
-`settle_ms` after the load event, then visits each `additional_urls` entry in
-order in the same session. REA does not download or install browsers.
+`clone_website` first checks that the output directory is absent and its parent
+is writable, so an unusable destination is refused before any page runs. It then
+launches the caller-selected Chrome or Chromium-family executable
+(`browser_executable_path`, CLI `--browser`, or `REA_BROWSER_EXECUTABLE`) with an
+owned temporary profile, loads the URL, waits `settle_ms` after the load event,
+then visits each `additional_urls` entry in order in the same session. REA does
+not download or install browsers.
 
 The page's own JavaScript runs while it loads and it can contact any server,
 exactly as in `capture_browser_scenario`. Every response body the browser
@@ -30,9 +32,15 @@ receives is retained within the selected budgets: `max_resource_bytes` per body
 `max_resources` network transactions (default 2,048). Bodies beyond a budget are
 recorded as unavailable with their reason; nothing is silently dropped.
 
-The complete capture Evidence is written as `capture.json` inside the clone. The
-clone's own Evidence links to it and records its digest, so the mirrored bytes
-remain traceable to the observation that produced them.
+The complete capture Evidence is written as `capture.json` inside the clone,
+serialized in bounded parts so large captures never build one document-sized
+string. The clone's own Evidence links to it and records its digest, so the
+mirrored bytes remain traceable to the observation that produced them. If the
+mirror cannot be published after a completed capture, the error keeps that
+capture Evidence as its partial observation (retained by reference over MCP).
+Failures inside the browser run keep the `capture_browser_scenario` operation of
+the stage that failed; a missing provider and cancellation before launch are
+reported as `clone_website`.
 
 ## Output layout
 
@@ -50,8 +58,9 @@ Browsers loading `file://` pages infer types from extensions, so HTML documents
 without `.html` and well-known types without a matching extension get one
 (`/about` becomes `about.html`). Each distinct query string gets its own file
 (`site.css?v=3` becomes `site~q<digest>.css`). Repeated responses with identical
-bytes are written once. Different bytes for one URL, colliding paths and
-unportable names are isolated under `files/isolated/` with a stated reason.
+bytes are written once. Different bytes for one URL, colliding paths, unportable
+names, names longer than 143 bytes and paths the destination rejects as too long
+are isolated under `files/isolated/` with a stated reason.
 Redirect hops have no body; references to them resolve to the final response.
 
 ## Browsable view
@@ -59,25 +68,38 @@ Redirect hops have no body; references to them resolve to the final response.
 View files are derived copies: only reference values are replaced, at their exact
 source positions, and every other byte is preserved. HTML `src`, `href`,
 `srcset`, `poster`, `data`, `background`, SVG `href`, `style` attributes and
-`<style>` elements are handled; CSS `url()` and `@import` are handled with a
-CSS Syntax Level 3 tokenizer, so URLs in comments and strings are ignored.
+`<style>` elements are handled; CSS `url()`, `@import` and string arguments of
+`image-set()` are handled with a CSS Syntax Level 3 tokenizer, so other URLs in
+comments and strings are ignored. Each source attribute is read once, even when
+the HTML parser reconstructs an unclosed `<a>` or `<font>` element.
 
 - A reference whose absolute URL (fragment removed) was captured points to the
   local view (HTML/CSS) or exact file, keeping the fragment.
 - An uncaptured relative reference becomes absolute, so it never silently points
   at a missing local file. Opening it needs network access.
-- Fragment-only, `data:`, `mailto:` and other non-HTTP references are unchanged.
-- `<base href>` becomes `./`. `integrity` and `crossorigin` are removed only from
-  elements whose reference now points to a local copy.
+- `data:`, `mailto:` and other non-HTTP references are unchanged, and so are empty
+  and fragment-only references that stay in the same document.
+- The document base is the first `<base href>` outside `<template>` content, even
+  an empty one. It is rewritten to the view file's own name, so in-page links keep
+  working; when the original base was another URL, empty and fragment-only
+  references are resolved against it like any other reference.
+- `integrity` and `crossorigin` are removed only from elements whose reference now
+  points to a local copy.
 
-HTML or CSS that is not valid UTF-8, or that has non-ASCII bytes under another
-declared charset, keeps only its exact file; pure ASCII is rewritten under any
+HTML or CSS that is not valid UTF-8, that has non-ASCII bytes under another
+declared charset, or that has no absolute URL keeps only its exact file; pure ASCII is rewritten under any
 ASCII-compatible charset. JavaScript is never rewritten: root-relative or computed
 URLs inside scripts stay unresolved, Chromium does not run module scripts from
 `file://` URLs, and opening the view runs the captured JavaScript in your
 browser.
 
 ## Results and limits
+
+The entry document is the captured document at the URL where the start
+navigation ended. After a client-side route change that matches no captured
+document, the first same-origin document requested during the start navigation
+is used and a limitation names both URLs; documents from other origins, such as
+third-party frames, never become the entry.
 
 The inline result is deliberately small: the entry document, coverage counts
 (transactions, exported, unique files, redirects, unavailable, views, rewritten

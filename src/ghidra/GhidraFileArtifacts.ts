@@ -4,7 +4,7 @@ import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   assertArtifactReadActive,
   artifactFileCancellationCause,
-  artifactFilePrimaryFailure,
+  artifactFilePrimaryFacts,
   mapArtifactFileFailure,
   bindArtifactFileCleanup,
   withArtifactFileHandle,
@@ -35,7 +35,7 @@ export const readGhidraProfileArtifact = <Value>(
   signal: AbortSignal | undefined,
   interpret: (bytes: Buffer) => Value,
 ): Promise<Value> =>
-  withArtifactRegularFile(path, resources, signal, async (file) => {
+  withArtifactRegularFile(path, resources, signal, async ({ handle: file }) => {
     const bytes = await readStableFileBytes(file, path, maximumBytes, {
       symlinks: "reject",
       ...(signal === undefined ? {} : { signal }),
@@ -99,12 +99,11 @@ export const ghidraFileFailure = (
     }
     return primary;
   });
-  if (cause instanceof AnalysisError) return cause;
-  const primary = artifactFilePrimaryFailure(cause);
+  const { cause: primary, origin } = artifactFilePrimaryFacts(cause);
   const reason = primary instanceof Error ? primary.message : String(primary);
   const cleanup =
     cause instanceof ArtifactReaderFailure ? cause.cleanup : undefined;
-  if (primary instanceof AnalysisError) {
+  if (origin === "owned-or-classified" && primary instanceof AnalysisError) {
     if (cleanup === undefined) return primary;
     const failure = new ProviderCleanupError(
       "ghidra",

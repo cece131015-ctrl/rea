@@ -12,6 +12,14 @@ import type { JsonValue } from "../domain/jsonValue.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { analysisSearchInput } from "../contracts/analysisSearchContract.js";
 import type { HopperClient } from "./HopperClient.js";
+import {
+  DEFAULT_REGEX_MATCHING_DEADLINE,
+  type RegexMatchingDeadline,
+} from "../config/regexMatchingDeadline.js";
+import {
+  DEFAULT_REGEX_WORKER_HEAP_REQUEST,
+  type RegexWorkerHeapRequest,
+} from "../config/regexWorkerHeapRequest.js";
 import { matchRegexValues } from "../process/RegexMatcher.js";
 import { analysisClientFailureForOperation } from "../providers/AnalysisClientFailure.js";
 
@@ -26,7 +34,11 @@ export class HopperRegexSearch {
     Promise<Result<JsonValue, AnalysisError>>
   >();
 
-  constructor(private readonly client: Pick<HopperClient, "callTool">) {}
+  constructor(
+    private readonly client: Pick<HopperClient, "callTool">,
+    private readonly deadline: RegexMatchingDeadline = DEFAULT_REGEX_MATCHING_DEADLINE,
+    private readonly heapRequest: RegexWorkerHeapRequest = DEFAULT_REGEX_WORKER_HEAP_REQUEST,
+  ) {}
 
   execute(
     operation: "search_strings" | "search_procedures",
@@ -129,13 +141,14 @@ export class HopperRegexSearch {
       caseSensitive: input.data.case_sensitive,
       values: parsed.data.map((item) => item.value),
       signal: options.signal,
-      invalidPattern: (reason) =>
-        new HopperRemoteError(-32000, `Invalid regex pattern: ${reason}`, {
-          diagnosticType: "invalid_request",
-          operation,
-        }),
+      deadline: this.deadline,
+      heapRequest: this.heapRequest,
     });
     if (!matched.ok) return matched;
+    if (options.signal?.aborted)
+      return err(
+        new AnalysisCancelledError(operation, { cause: options.signal.reason }),
+      );
     const selected = new Set(matched.value);
     return ok(parsed.data.filter((_, index) => selected.has(index)));
   }

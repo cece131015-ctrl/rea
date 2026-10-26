@@ -68,6 +68,36 @@ describe("RPC object property ownership", () => {
 });
 
 describe("tRPC procedure recognition", () => {
+  it("preserves lexical clients and router members with browser-global spellings", () => {
+    expect(
+      rpcEndpoints(`function scope() {
+      const history=createTRPCClient({links:[httpBatchLink({url:'/api/trpc'})]});
+      history.archive.query();
+      history.history.list.query();
+      history.endpoints.list.query();
+      navigator.permissions.query({name:'geolocation'});
+      api.endpoints.list.useQuery();
+    }`),
+    ).toEqual([
+      {
+        kind: "network",
+        value: "/api/trpc",
+        mechanism: "trpc:link:httpBatchLink",
+      },
+      { kind: "network", value: "archive", mechanism: "trpc:procedure:query" },
+      {
+        kind: "network",
+        value: "history.list",
+        mechanism: "trpc:procedure:query",
+      },
+      {
+        kind: "network",
+        value: "endpoints.list",
+        mechanism: "trpc:procedure:query",
+      },
+    ]);
+  });
+
   it("recognizes React hook procedures on a renamed proxy root", () => {
     expect(
       rpcEndpoints(`
@@ -126,7 +156,9 @@ describe("tRPC procedure recognition", () => {
       },
     ]);
   });
+});
 
+describe("tRPC procedure recognition", () => {
   it("recognizes vanilla client calls and link URLs only in sources carrying a tRPC marker", () => {
     expect(
       rpcEndpoints(`

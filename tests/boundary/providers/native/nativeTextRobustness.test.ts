@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 
 import { parseOtoolLoadCommands } from "../../../../src/native/parsers/otool.js";
-import { parsePlistJson } from "../../../../src/native/parsers/plist.js";
+import { readPlistJson } from "../../../../src/native/parsers/plist.js";
 import { parseLipoOutput } from "../../../../src/native/parsers/lipo.js";
 import { nativeFixture } from "../../../fixtures/nativeCommands.js";
 
@@ -73,9 +73,9 @@ it("does not leak section fields into command fields under CRLF captures", async
 });
 
 it("accepts a byte-order mark before plist JSON", () => {
-  const parsed = parsePlistJson(
+  const parsed = readPlistJson(
     '\uFEFF{"CFBundleIdentifier":"com.owned.fixture"}',
-  );
+  ).project();
   if (!parsed.ok) throw new Error("expected plist JSON to parse");
   expect(parsed.value.bundle.identifier).toBe("com.owned.fixture");
 });

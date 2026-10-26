@@ -32,8 +32,8 @@ type MachoCollection = (typeof MACHO_COLLECTIONS)[number];
 export const machoViewRequestSchema = z.strictObject({
   kind: z.literal("macho"),
   facet: z.enum([...MACHO_COLLECTIONS, "provenance"]),
-  offset: z.number().int().nonnegative().default(0),
-  limit: z.number().int().positive().default(64),
+  offset: z.int().nonnegative().default(0),
+  limit: z.int().positive().default(64),
 });
 
 const { shape } = inspectMachoSchema;
@@ -51,7 +51,8 @@ export const machoViewItemSchema = z.union([
   exactRows(shape.build_metadata.shape.items),
   exactRows(shape.load_commands.shape.items),
   exactRows(shape.dependencies.shape.items),
-  // Imports and exports share one row shape.
+  // Exports must precede imports, whose historical defaults also accept export keys.
+  exactRows(shape.exports.shape.items),
   exactRows(shape.imports.shape.items),
   exactRows(shape.segments.shape.items),
   exactRows(shape.provenance),
@@ -59,13 +60,13 @@ export const machoViewItemSchema = z.union([
 
 /** The producer's own coverage of the paged collection, not of this page. */
 export const machoViewContextSchema = z.strictObject({
-  source_total: z.number().int().nonnegative().nullable(),
+  source_total: z.int().nonnegative().nullable(),
   source_exhaustive: z.boolean(),
 });
 
 const collectionCountSchema = z.strictObject({
-  returned: z.number().int().nonnegative(),
-  total: z.number().int().nonnegative().nullable(),
+  returned: z.int().nonnegative(),
+  total: z.int().nonnegative().nullable(),
   exhaustive: z.boolean(),
 });
 
@@ -83,8 +84,8 @@ export const machoSummarySchema = z.strictObject({
       MACHO_COLLECTIONS.map((name) => [name, collectionCountSchema]),
     ) as Record<MachoCollection, typeof collectionCountSchema>,
   ),
-  provenance_count: z.number().int().nonnegative(),
-  limitation_count: z.number().int().nonnegative(),
+  provenance_count: z.int().nonnegative(),
+  limitation_count: z.int().nonnegative(),
 });
 
 type MachoReport = z.output<typeof inspectMachoSchema>;

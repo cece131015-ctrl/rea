@@ -2,6 +2,12 @@ import * as t from "@babel/types";
 import type { JavaScriptSemanticPrimitive } from "./javascriptSemanticValueTypes.js";
 import { SEMANTIC_EXPRESSION_DEPTH_LIMIT } from "./javascriptSemanticResourceLimits.js";
 
+/** Type-only class fields neither initialize own slots nor shadow inherited members. */
+export const isRuntimeJavaScriptClassProperty = (
+  node: t.Node,
+): node is t.ClassProperty =>
+  t.isClassProperty(node) && node.declare !== true && node.abstract !== true;
+
 /** TypeScript receiver annotations occupy no positional runtime parameter slot. */
 export const runtimeFunctionParameters = (
   node: t.Function,
@@ -9,6 +15,20 @@ export const runtimeFunctionParameters = (
   t.isIdentifier(node.params[0], { name: "this" })
     ? node.params.slice(1)
     : node.params;
+
+/** One erased syntax edge, without walking a potentially nested wrapper chain. */
+export const javaScriptExpressionWrapperTarget = (
+  node: t.Node,
+): t.Node | undefined =>
+  t.isParenthesizedExpression(node) ||
+  t.isTSAsExpression(node) ||
+  t.isTSTypeAssertion(node) ||
+  t.isTSNonNullExpression(node) ||
+  t.isTSSatisfiesExpression(node) ||
+  t.isTSInstantiationExpression(node) ||
+  t.isTypeCastExpression(node)
+    ? node.expression
+    : undefined;
 
 /**
  * Remove wrappers that affect TypeScript or Flow checking but not runtime
@@ -21,15 +41,9 @@ export const unwrapJavaScriptExpression = (
 ): { readonly node: t.Node; readonly depth: number } => {
   let current = node;
   let depth = 0;
-  while (
-    t.isParenthesizedExpression(current) ||
-    t.isTSAsExpression(current) ||
-    t.isTSTypeAssertion(current) ||
-    t.isTSNonNullExpression(current) ||
-    t.isTSSatisfiesExpression(current) ||
-    t.isTSInstantiationExpression(current) ||
-    t.isTypeCastExpression(current)
-  ) {
+  for (;;) {
+    const target = javaScriptExpressionWrapperTarget(current);
+    if (target === undefined) break;
     // Optional-chain grouping affects execution even when expression identity
     // is transparent. Keep every grouping boundary available to that consumer.
     if (
@@ -38,7 +52,7 @@ export const unwrapJavaScriptExpression = (
         current.extra?.parenthesized === true)
     )
       break;
-    current = current.expression;
+    current = target;
     depth += 1;
   }
   return { node: current, depth };
@@ -118,6 +132,26 @@ export const semanticStaticPropertyKey = (
   return !computed && t.isIdentifier(property) ? property.name : null;
 };
 
+/** Determine value truthiness from syntax, without executing source or resolving bindings. */
+export const staticJavaScriptTruthiness = (
+  node: t.Node,
+): boolean | undefined => {
+  const value = unwrapJavaScriptExpression(node).node;
+  if (t.isBooleanLiteral(value)) return value.value;
+  if (t.isNullLiteral(value)) return false;
+  if (t.isStringLiteral(value)) return value.value.length > 0;
+  if (t.isNumericLiteral(value))
+    return value.value !== 0 && !Number.isNaN(value.value);
+  if (
+    t.isObjectExpression(value) ||
+    t.isArrayExpression(value) ||
+    t.isFunctionExpression(value) ||
+    t.isArrowFunctionExpression(value)
+  )
+    return true;
+  return undefined;
+};
+
 /** Syntax whose value cannot contribute own properties to an object spread. */
 export const isNullishJavaScriptSyntax = (node: t.Node): boolean => {
   node = unwrapJavaScriptExpression(node).node;
@@ -130,6 +164,80 @@ type StaticObjectProperty =
   | { readonly status: "missing" | "dynamic" }
   | { readonly status: "explicit"; readonly property: t.ObjectProperty };
 
+type StaticObjectMember =
+  | { readonly kind: "unknown" }
+  | { readonly kind: "prototype-setter" }
+  | {
+      readonly kind: "property";
+      readonly property: t.ObjectProperty | t.ObjectMethod;
+    };
+
+const UNKNOWN_STATIC_OBJECT_MEMBER: StaticObjectMember = { kind: "unknown" };
+
+/** Object-literal prototype setters are never ordinary own-property writes. */
+export const isObjectPrototypeSetter = (property: t.ObjectProperty): boolean =>
+  !property.computed &&
+  !property.shorthand &&
+  semanticStaticPropertyKey(property.key, false) === "__proto__";
+
+/** Expand only bounded literal spreads, preserving unknown writes in order. */
+const appendStaticObjectMembers = (
+  members: StaticObjectMember[],
+  object: t.ObjectExpression,
+  depth: number,
+  isNullish?: (node: t.Node) => boolean,
+): void => {
+  for (const property of object.properties) {
+    if (!t.isSpreadElement(property)) {
+      if (t.isObjectProperty(property) && isObjectPrototypeSetter(property)) {
+        // A top-level setter changes lookup inheritance but is never an own
+        // key; one copied through object spread has no effect on the target.
+        if (depth === 0) members.push({ kind: "prototype-setter" });
+        continue;
+      }
+      members.push({ kind: "property", property });
+      continue;
+    }
+    const { node: spread, depth: wrappers } = unwrapJavaScriptExpression(
+      property.argument,
+    );
+    if (t.isObjectExpression(spread)) {
+      const nextDepth = depth + wrappers + 1;
+      // Copying a getter can run code that changes another source key.
+      if (
+        nextDepth > SEMANTIC_EXPRESSION_DEPTH_LIMIT ||
+        spread.properties.some((entry) =>
+          t.isObjectMethod(entry, { kind: "get" }),
+        )
+      ) {
+        members.push(UNKNOWN_STATIC_OBJECT_MEMBER);
+        continue;
+      }
+      appendStaticObjectMembers(members, spread, nextDepth, isNullish);
+      continue;
+    }
+    // These primitive boxes have no own keys; strings can own index keys.
+    if (
+      t.isBooleanLiteral(spread) ||
+      t.isNumericLiteral(spread) ||
+      t.isBigIntLiteral(spread) ||
+      isNullish?.(property.argument) === true
+    )
+      continue;
+    members.push(UNKNOWN_STATIC_OBJECT_MEMBER);
+  }
+};
+
+const staticObjectMembers = (
+  object: t.ObjectExpression,
+  depth: number,
+  isNullish?: (node: t.Node) => boolean,
+): readonly StaticObjectMember[] => {
+  const members: StaticObjectMember[] = [];
+  appendStaticObjectMembers(members, object, depth, isNullish);
+  return members;
+};
+
 /** Find the effective explicit property, preserving unresolved overrides. */
 export const staticObjectProperty = (
   object: t.Node | undefined,
@@ -138,49 +246,57 @@ export const staticObjectProperty = (
 ): StaticObjectProperty => {
   if (object === undefined) return { status: "missing" };
   if (!t.isObjectExpression(object)) return { status: "dynamic" };
-  const lookup = (
-    current: t.ObjectExpression,
-    depth: number,
-  ): StaticObjectProperty => {
-    for (const property of current.properties.toReversed()) {
-      if (t.isSpreadElement(property)) {
-        const { node: spread, depth: wrappers } = unwrapJavaScriptExpression(
-          property.argument,
-        );
-        if (t.isObjectExpression(spread)) {
-          const nextDepth = depth + wrappers + 1;
-          // Copying a getter can run code that changes another source key.
-          if (
-            nextDepth > SEMANTIC_EXPRESSION_DEPTH_LIMIT ||
-            spread.properties.some((entry) =>
-              t.isObjectMethod(entry, { kind: "get" }),
-            )
-          )
-            return { status: "dynamic" };
-          const found = lookup(spread, nextDepth);
-          if (found.status === "missing") continue;
-          return found;
-        }
-        // These primitive boxes have no own keys; strings can own index keys.
-        if (
-          t.isBooleanLiteral(spread) ||
-          t.isNumericLiteral(spread) ||
-          t.isBigIntLiteral(spread) ||
-          isNullish?.(property.argument) === true
-        )
-          continue;
-        return { status: "dynamic" };
-      }
-      const key = semanticStaticPropertyKey(property.key, property.computed);
-      if (key === null) return { status: "dynamic" };
-      if (key !== name) continue;
-      return t.isObjectProperty(property)
-        ? { status: "explicit", property }
-        : { status: "dynamic" };
+  let prototypeMaySupply = false;
+  for (const member of staticObjectMembers(object, 0, isNullish).toReversed()) {
+    if (member.kind === "prototype-setter") {
+      prototypeMaySupply = true;
+      continue;
     }
-    return { status: "missing" };
-  };
-  return lookup(object, 0);
+    if (member.kind === "unknown") return { status: "dynamic" };
+    const { property } = member;
+    const key = semanticStaticPropertyKey(property.key, property.computed);
+    if (key === null) return { status: "dynamic" };
+    if (key !== name) continue;
+    return t.isObjectProperty(property)
+      ? { status: "explicit", property }
+      : { status: "dynamic" };
+  }
+  return prototypeMaySupply ? { status: "dynamic" } : { status: "missing" };
+};
+
+export type StaticObjectPropertyNames =
+  | { readonly status: "missing" | "dynamic" }
+  | { readonly status: "partial"; readonly names: readonly string[] }
+  | { readonly status: "complete"; readonly names: readonly string[] };
+
+/** Retain known own names and report unresolved object membership separately. */
+export const staticObjectPropertyNames = (
+  object: t.Node | undefined,
+  isNullish?: (node: t.Node) => boolean,
+): StaticObjectPropertyNames => {
+  if (object === undefined) return { status: "missing" };
+  if (!t.isObjectExpression(object)) return { status: "dynamic" };
+  const names = new Set<string>();
+  let complete = true;
+  for (const member of staticObjectMembers(object, 0, isNullish)) {
+    if (member.kind === "prototype-setter") continue;
+    if (member.kind === "unknown") {
+      complete = false;
+      continue;
+    }
+    const key = semanticStaticPropertyKey(
+      member.property.key,
+      member.property.computed,
+    );
+    if (key === null) {
+      complete = false;
+      continue;
+    }
+    names.add(key);
+  }
+  return complete
+    ? { status: "complete", names: [...names] }
+    : { status: "partial", names: [...names] };
 };
 
 /** Later properties own a key; an intervening dynamic write leaves it unknown. */
@@ -281,3 +397,31 @@ export function* semanticWriteTargets(
  */
 export const javascriptDisplayText = (value: string): string =>
   value === "" ? '""' : value;
+
+/** Strip a static member chain, returning its root expression and member path. */
+export const semanticMemberChain = (
+  node: t.Node | null | undefined,
+  admit?: (node: t.Node) => boolean,
+):
+  | { readonly root: t.Node | null | undefined; readonly members: string[] }
+  | undefined => {
+  const members: string[] = [];
+  let current = node;
+  while (current !== null && current !== undefined) {
+    current = unwrapJavaScriptExpression(current).node;
+    if (admit?.(current) === false) return undefined;
+    if (
+      !t.isMemberExpression(current) &&
+      !t.isOptionalMemberExpression(current)
+    )
+      break;
+    const member = semanticStaticPropertyKey(
+      current.property,
+      current.computed,
+    );
+    if (member === null || !t.isNode(current.object)) return undefined;
+    members.push(member);
+    current = current.object;
+  }
+  return { root: current, members: members.reverse() };
+};

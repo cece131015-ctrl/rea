@@ -4,16 +4,18 @@ import {
   AnalysisTimeoutError,
 } from "../domain/analysisErrorCore.js";
 import { isAbsolute } from "node:path";
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 
 import {
   execFileOutput,
+  execFileFailureCapturedOutput,
   ExecFileOutputCancelledError,
   execFileOutputFailure,
 } from "../process/ExecFileOutput.js";
 import type { ProviderAvailability } from "../application/AnalysisProvider.js";
 import type { ProviderRejectionCode } from "../contracts/providerSelection.js";
+import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import type { JsonValue } from "../domain/jsonValue.js";
-import { adbCommandCapturedOutput } from "./AdbCommand.js";
 
 /** Environment key selecting the caller's adb binary. */
 export const ADB_BINARY_ENV = "REA_ADB_PATH";
@@ -25,6 +27,7 @@ const VERSION_MAX_OUTPUT_BYTES = 64 * 1024;
 export interface AdbBinarySelection {
   readonly binary: string;
   readonly pathSource: "environment" | "path";
+  readonly environment: Readonly<Record<string, string | undefined>>;
 }
 
 /**
@@ -35,21 +38,31 @@ export interface AdbBinarySelection {
 export const resolveAdbBinary = (
   environment: Readonly<Record<string, string | undefined>>,
 ): AdbBinarySelection => {
-  const configured = environment[ADB_BINARY_ENV];
+  const selectedEnvironment = snapshotEnvironment(environment);
+  const configured = selectedEnvironment[ADB_BINARY_ENV];
   if (configured === undefined || configured.trim() === "")
-    return { binary: "adb", pathSource: "path" };
+    return {
+      binary: "adb",
+      pathSource: "path",
+      environment: selectedEnvironment,
+    };
   if (!isAbsolute(configured))
     throw new AdbConfigurationFailure(
       "not_absolute",
       `${ADB_BINARY_ENV} must be an absolute path to the adb binary`,
       { configured_path: configured },
     );
-  return { binary: configured, pathSource: "environment" };
+  return {
+    binary: configured,
+    pathSource: "environment",
+    environment: selectedEnvironment,
+  };
 };
 
 export type AdbConfigurationFailureCode =
   | "not_absolute"
   | "binary_missing"
+  | "binary_not_executable"
   | "version_unresolved";
 
 export class AdbConfigurationFailure extends Error {
@@ -96,6 +109,7 @@ export const inspectAdbClient = async (
       selection.binary,
       ["version"],
       {
+        env: selection.environment,
         timeout: VERSION_TIMEOUT_MS,
         stopSignal: "SIGTERM",
         maxBuffer: VERSION_MAX_OUTPUT_BYTES,
@@ -126,7 +140,7 @@ export const inspectAdbClient = async (
         cause: cause.cause,
         ...(failure === undefined
           ? {}
-          : { capturedOutput: adbCommandCapturedOutput(failure) }),
+          : { capturedOutput: execFileFailureCapturedOutput(failure) }),
       });
     const diagnostics = {
       selected_binary: selection.binary,
@@ -138,22 +152,29 @@ export const inspectAdbClient = async (
       diagnostics,
       ...(failure === undefined
         ? {}
-        : { capturedOutput: adbCommandCapturedOutput(failure) }),
+        : { capturedOutput: execFileFailureCapturedOutput(failure) }),
     };
-    if (failure?.outputTruncated === true)
+    if (failure?.outputTruncated === true) {
       throw new AnalysisResourceConstraintError(
         "inspect_adb_client",
         "memory",
         `adb version output exceeded the ${String(VERSION_MAX_OUTPUT_BYTES)}-byte capture budget`,
         { max_output_bytes: VERSION_MAX_OUTPUT_BYTES },
-        options,
+        {
+          ...options,
+          ...fixedAllowanceOptions(
+            `The adb version-output capture allowance of ${String(VERSION_MAX_OUTPUT_BYTES)} bytes (this release has no runtime override)`,
+            "capture",
+          ),
+        },
       );
+    }
     if (failure?.code === "ETIMEDOUT")
-      throw new AnalysisTimeoutError(
-        "inspect_adb_client",
-        VERSION_TIMEOUT_MS,
-        options,
-      );
+      throw new AnalysisTimeoutError("inspect_adb_client", VERSION_TIMEOUT_MS, {
+        ...options,
+        userMessage: `adb version probe reached its ${String(VERSION_TIMEOUT_MS)} ms deadline (deadlineExpired). This release has no runtime override.`,
+        remediationAction: `This ${String(VERSION_TIMEOUT_MS)} ms adb version probe has no runtime override. Allow execution, cleanup and delivery headroom in the outer MCP client deadline. Confirm outstanding work and cleanup before retrying.`,
+      });
     if (failure?.code === "ENOENT")
       throw new AdbConfigurationFailure(
         "binary_missing",
@@ -162,6 +183,18 @@ export const inspectAdbClient = async (
           selected_binary: selection.binary,
           path_source: selection.pathSource,
           remediation: `Set ${ADB_BINARY_ENV} to an absolute path to an existing adb binary`,
+        },
+        { cause },
+      );
+    if (failure?.code === "EACCES" || failure?.code === "EPERM")
+      throw new AdbConfigurationFailure(
+        "binary_not_executable",
+        `Execution of the selected adb binary was denied (${failure.code}): ${selection.binary}`,
+        {
+          selected_binary: selection.binary,
+          path_source: selection.pathSource,
+          filesystem_error: failure.code,
+          remediation: `Check file type and execute permission for ${ADB_BINARY_ENV} or select an executable adb binary`,
         },
         { cause },
       );
@@ -188,7 +221,7 @@ const rejectionCodeOf = (
 ): ProviderRejectionCode =>
   code === "binary_missing"
     ? "executable_missing"
-    : code === "not_absolute"
+    : code === "not_absolute" || code === "binary_not_executable"
       ? "not_configured"
       : "version_unresolved";
 

@@ -1,12 +1,16 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, onTestFinished, vi } from "vitest";
 
 const injected = vi.hoisted(() => ({
   sourcePath: undefined as string | undefined,
   abortController: undefined as AbortController | undefined,
+  abortDuringClose: false,
+  abortReason: undefined as unknown,
+  readFailure: undefined as Error | undefined,
   failClose: false,
   closeAttempts: 0,
+  sourceHandle: undefined as import("node:fs/promises").FileHandle | undefined,
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -16,14 +20,27 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     open: async (...args: Parameters<typeof actual.open>) => {
       const handle = await actual.open(...args);
       if (args[0] !== injected.sourcePath) return handle;
-      const createReadStream = handle.createReadStream.bind(handle);
-      handle.createReadStream = (options) => {
-        injected.abortController?.abort();
-        return createReadStream(options);
-      };
+      injected.sourceHandle = handle;
+      const read = handle.read.bind(handle);
+      Object.defineProperty(handle, "read", {
+        value: async (
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          if (injected.readFailure !== undefined) throw injected.readFailure;
+          const result = await read(buffer, offset, length, position);
+          if (!injected.abortDuringClose)
+            injected.abortController?.abort(injected.abortReason);
+          return result;
+        },
+      });
       const close = handle.close.bind(handle);
       handle.close = async () => {
         injected.closeAttempts += 1;
+        if (injected.abortDuringClose)
+          injected.abortController?.abort(injected.abortReason);
         if (injected.failClose) throw new Error("fixture close refusal");
         await close();
       };
@@ -38,30 +55,43 @@ import { LocalWebModuleArtifacts } from "../../../src/browser/modules/WebModuleA
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { AnalysisCancelledError } from "../../../src/domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
+import { primaryAnalysisError } from "../../../src/domain/analysisErrorBase.js";
 import { webModuleArtifactsFixture } from "../../fixtures/webModuleTrace.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
-it("retains cancelled source read ownership until service close retries it", async () => {
+const sourceFixture = async (source: string) => {
   const root = await createTestTempDirectory("rea-web-artifact-read-owner-");
-  onTestFinished(async () => {
-    injected.sourcePath = undefined;
-    injected.abortController = undefined;
-    injected.failClose = false;
-    injected.closeAttempts = 0;
-    await rm(root, { recursive: true, force: true });
-  });
-  const source = 'import "./dep.js";';
   const fixture = webModuleArtifactsFixture(source);
   const manifestPath = join(root, "manifest.json");
   const sourcePath = join(root, "files", "modules", "main.js");
   await mkdir(join(root, "files", "modules"), { recursive: true });
   await writeFile(sourcePath, source);
   await writeFile(manifestPath, JSON.stringify(fixture.manifest));
+  return {
+    input: { manifest_path: manifestPath, script_index: 0 },
+    sourcePath,
+    fixture,
+  };
+};
+
+it("retains cancelled source read ownership until service close retries it", async () => {
+  onTestFinished(() => {
+    injected.sourcePath = undefined;
+    injected.abortController = undefined;
+    injected.abortDuringClose = false;
+    injected.abortReason = undefined;
+    injected.readFailure = undefined;
+    injected.failClose = false;
+    injected.closeAttempts = 0;
+    injected.sourceHandle = undefined;
+  });
+  const { input, sourcePath } = await sourceFixture('import "./dep.js";');
 
   injected.sourcePath = sourcePath;
   injected.failClose = true;
   const controller = new AbortController();
   injected.abortController = controller;
+  injected.abortReason = { request: "cancel after source read" };
   const resolver = {
     resolve: vi.fn(),
     close: vi.fn(async () => undefined),
@@ -70,7 +100,11 @@ it("retains cancelled source read ownership until service close retries it", asy
     new LocalWebModuleArtifacts(),
     resolver,
   );
-  const input = { manifest_path: manifestPath, script_index: 0 };
+  onTestFinished(async () => {
+    injected.failClose = false;
+    injected.abortController = undefined;
+    await service.close();
+  });
 
   const cancelled = await service.trace(input, { signal: controller.signal });
   expect(cancelled.ok).toBe(false);
@@ -78,6 +112,9 @@ it("retains cancelled source read ownership until service close retries it", asy
   expect(cancelled.error.cleanupIncomplete).toBe(true);
   expect(cancelled.error.cleanupResources).toContain(sourcePath);
   expect(resolver.resolve).not.toHaveBeenCalled();
+  expect(primaryAnalysisError(cancelled.error).cause).toBe(
+    injected.abortReason,
+  );
 
   injected.abortController = undefined;
   const blocked = await service.trace(input);
@@ -107,6 +144,7 @@ it("retains cancelled source read ownership until service close retries it", asy
     service,
     "web-module-artifacts",
     "trace_web_module_imports",
+    new AbortController().signal,
   );
   expect(finalized).toMatchObject({
     code: "cleanup_incomplete",
@@ -119,7 +157,104 @@ it("retains cancelled source read ownership until service close retries it", asy
   await service.close();
   expect(injected.closeAttempts).toBeGreaterThan(attemptsBeforeRetry);
   expect(resolver.close).toHaveBeenCalledTimes(3);
+  expect(injected.sourceHandle?.fd).toBe(-1);
+  for (const error of [cancelled.error, blocked.error, cleanupFailure]) {
+    expect(error).toMatchObject({
+      cleanupIncomplete: false,
+      cleanupResources: [],
+    });
+  }
 });
+
+it.each([
+  { readFails: true, closeFails: false, cancel: true },
+  { readFails: true, closeFails: true, cancel: true },
+  { readFails: true, closeFails: true, cancel: false },
+  { readFails: false, closeFails: false, cancel: true },
+  { readFails: false, closeFails: true, cancel: true },
+  { readFails: false, closeFails: false, cancel: false },
+])(
+  "keeps physical source read failure and exact cleanup ownership %j",
+  async ({ readFails, closeFails, cancel }) => {
+    const { input, sourcePath, fixture } = await sourceFixture(
+      "export const value = 1;",
+    );
+    const physical = Object.assign(new Error("fixture descriptor EIO"), {
+      code: "EIO",
+      syscall: "read",
+    });
+    const reason = { request: "cancel during failed source finalization" };
+    const controller = new AbortController();
+    injected.sourcePath = sourcePath;
+    injected.readFailure = readFails ? physical : undefined;
+    injected.failClose = closeFails;
+    injected.abortController = cancel ? controller : undefined;
+    injected.abortDuringClose = true;
+    injected.abortReason = reason;
+    injected.closeAttempts = 0;
+    const service = new WebModuleTraceService(new LocalWebModuleArtifacts(), {
+      resolve: vi.fn(),
+    });
+    onTestFinished(async () => {
+      injected.failClose = false;
+      injected.abortController = undefined;
+      await service.close();
+      injected.sourcePath = undefined;
+      injected.readFailure = undefined;
+      injected.abortDuringClose = false;
+      injected.abortReason = undefined;
+      injected.closeAttempts = 0;
+      injected.sourceHandle = undefined;
+    });
+    const result = await service.trace(input, { signal: controller.signal });
+    expect(controller.signal.aborted).toBe(cancel);
+    if (cancel) expect(controller.signal.reason).toBe(reason);
+    if (!readFails && !cancel) {
+      if (!result.ok) throw result.error;
+      expect(result.value.normalized_result).toMatchObject({
+        source: { path: sourcePath, sha256: fixture.sourceFile.sha256 },
+        manifest: { path: input.manifest_path },
+      });
+      await service.close();
+      expect(injected.sourceHandle?.fd).toBe(-1);
+      expect(injected.closeAttempts).toBe(1);
+      return;
+    }
+    if (result.ok) throw new Error("Expected source read failure");
+    const primary = primaryAnalysisError(result.error);
+    if (readFails)
+      expect(primary).toMatchObject({
+        _tag: "ArtifactOperationError",
+        reason: "io",
+      });
+    else expect(primary).toBeInstanceOf(AnalysisCancelledError);
+    expect(primary.cause).toBe(readFails ? physical : reason);
+    expect(result.error.partialObservation).toBeUndefined();
+    expect(result.error.cleanupIncomplete).toBe(closeFails);
+    if (closeFails) {
+      expect(result.error.cleanupResources).toEqual([sourcePath]);
+      expect(injected.sourceHandle?.fd).toBeGreaterThanOrEqual(0);
+    }
+    injected.failClose = false;
+    await service.close();
+    expect(injected.sourceHandle?.fd).toBe(-1);
+    expect(injected.closeAttempts).toBe(closeFails ? 2 : 1);
+    expect(result.error.cleanupIncomplete).toBe(false);
+    expect(result.error.cleanupResources).toEqual([]);
+    expect(primaryAnalysisError(result.error)).toBe(primary);
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: readFails ? "artifact_operation_failed" : "cancelled",
+      ...(readFails
+        ? {
+            details: {
+              reason: "io",
+              detail: expect.stringContaining("EIO"),
+            },
+          }
+        : {}),
+    });
+  },
+);
 
 it("preserves both web cleanup owners' resources, diagnostics and recovery actions", async () => {
   const artifacts = new ProviderCleanupError(

@@ -7,6 +7,11 @@ export const analysisSearchInput = {
     .min(1)
     .describe("The literal text or regex pattern to search for"),
   mode: z.enum(["literal", "regex"]).default("literal"),
-  case_sensitive: z.boolean().default(false).describe("Whether to match case"),
+  case_sensitive: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Whether to match case; case-insensitive matching uses Unicode simple case folding, one character at a time",
+    ),
   document: z.string().optional().describe("The document name"),
 };

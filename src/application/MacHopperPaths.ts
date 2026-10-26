@@ -1,18 +1,19 @@
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, type Dirent } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { posix } from "node:path";
 
 export const MAC_HOPPER_APPLICATION_DIRECTORY = "/Applications";
 export const MAC_HOPPER_APPLICATION_NAME = "Hopper Disassembler.app";
 export const MAC_HOPPER_USER_APPLICATIONS_DIRECTORY = "Applications";
 
-export const MAC_HOPPER_SYSTEM_LAUNCHER = join(
+export const MAC_HOPPER_SYSTEM_LAUNCHER = posix.join(
   MAC_HOPPER_APPLICATION_DIRECTORY,
   MAC_HOPPER_APPLICATION_NAME,
   "Contents/MacOS/hopper",
 );
 
 export const macHopperUserApplicationPath = (homeDirectory: string): string =>
-  join(
+  posix.join(
     homeDirectory,
     MAC_HOPPER_USER_APPLICATIONS_DIRECTORY,
     MAC_HOPPER_APPLICATION_NAME,
@@ -22,14 +23,17 @@ export const macHopperApplicationRoots = (
   homeDirectory: string,
 ): readonly string[] => [
   MAC_HOPPER_APPLICATION_DIRECTORY,
-  join(homeDirectory, MAC_HOPPER_USER_APPLICATIONS_DIRECTORY),
+  posix.join(homeDirectory, MAC_HOPPER_USER_APPLICATIONS_DIRECTORY),
 ];
 
 export const macHopperCanonicalLauncherCandidates = (
   homeDirectory: string,
 ): readonly string[] => [
   MAC_HOPPER_SYSTEM_LAUNCHER,
-  join(macHopperUserApplicationPath(homeDirectory), "Contents/MacOS/hopper"),
+  posix.join(
+    macHopperUserApplicationPath(homeDirectory),
+    "Contents/MacOS/hopper",
+  ),
 ];
 
 /** Build deterministic candidates from the discovered app bundle names. */
@@ -46,16 +50,15 @@ export const macHopperRenamedLauncherCandidates = (
             MAC_HOPPER_APPLICATION_NAME.toLocaleLowerCase("en-US"),
       )
       .sort()
-      .map((name) => join(root, name, "Contents/MacOS/hopper")),
+      .map((name) => posix.join(root, name, "Contents/MacOS/hopper")),
   );
+
+const directoryNames = (entries: readonly Dirent[]): readonly string[] =>
+  entries.filter((entry) => entry.isDirectory()).map(({ name }) => name);
 
 const localBundleNames = (root: string): readonly string[] => {
   try {
-    return readdirSync(root, { withFileTypes: true })
-      .filter(
-        (entry) => entry.isDirectory() && /^Hopper.*\.app$/iu.test(entry.name),
-      )
-      .map(({ name }) => name);
+    return directoryNames(readdirSync(root, { withFileTypes: true }));
   } catch (cause: unknown) {
     // Missing or unreadable optional app directories contain no candidates.
     void cause;
@@ -63,14 +66,32 @@ const localBundleNames = (root: string): readonly string[] => {
   }
 };
 
-/** Yield canonical paths first; enumerate renamed bundles only if needed. */
-export function* macHopperLauncherCandidates(
+/** Yield renamed bundles from the local filesystem, reading each root only if needed. */
+export function* localMacHopperRenamedLauncherCandidates(
   homeDirectory: string,
 ): Generator<string> {
-  yield* macHopperCanonicalLauncherCandidates(homeDirectory);
   for (const root of macHopperApplicationRoots(homeDirectory))
     yield* macHopperRenamedLauncherCandidates(
       homeDirectory,
       new Map([[root, localBundleNames(root)]]),
     );
 }
+
+/** Read the same renamed bundles without blocking the event loop, for doctor. */
+export const readMacHopperRenamedLauncherCandidates = async (
+  homeDirectory: string,
+): Promise<readonly string[]> => {
+  const bundleNamesByRoot = new Map<string, readonly string[]>();
+  for (const root of macHopperApplicationRoots(homeDirectory)) {
+    try {
+      bundleNamesByRoot.set(
+        root,
+        directoryNames(await readdir(root, { withFileTypes: true })),
+      );
+    } catch (cause: unknown) {
+      // Missing or unreadable optional app directories contain no candidates.
+      void cause;
+    }
+  }
+  return macHopperRenamedLauncherCandidates(homeDirectory, bundleNamesByRoot);
+};

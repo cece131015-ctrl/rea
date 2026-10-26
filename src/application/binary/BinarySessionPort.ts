@@ -8,11 +8,13 @@ import type { JsonValue } from "../../domain/jsonValue.js";
 import type { AnalysisSnapshot } from "../../domain/analysisSnapshot.js";
 import type { AnalysisProfileCommitment } from "../../domain/analysisProfile.js";
 import type { AnalysisProviderSelector } from "../../contracts/providerSelection.js";
+import type { BinarySessionDetail } from "../../contracts/sessionStatusContract.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import type { Result } from "../../domain/result.js";
 import type { EvidenceIntegrityError } from "../../domain/evidenceErrors.js";
 import type { AnalysisSnapshotLoader } from "./BinarySessionOpen.js";
 import type { WorkflowSnapshotRecordInput } from "./BinarySessionRecords.js";
+import type { ResolvedAppBundleResourceRoot } from "../AppBundleExecutable.js";
 
 import type {
   AnalysisExecution,
@@ -76,6 +78,11 @@ export interface BinarySessionPort
       readonly providerId?: AnalysisProviderSelector;
     },
   ): Promise<Result<BinaryTarget, AnalysisError>>;
+  /** Open a resource-only app root without selecting or inventing an executable target. */
+  openBundleResources(
+    path: string,
+    options?: Pick<ExecutionOptions, "signal">,
+  ): Promise<Result<ResolvedAppBundleResourceRoot, AnalysisError>>;
   close(
     options?: Pick<ExecutionOptions, "progress"> & {
       readonly retainProviderDocuments?: boolean;
@@ -87,8 +94,17 @@ export interface BinarySessionPort
     overwrite: boolean,
     options?: Pick<ExecutionOptions, "progress">,
   ): Promise<Result<SavedAnalysisSnapshot, AnalysisError>>;
-  status(options?: { readonly signal?: AbortSignal }): Promise<JsonValue>;
+  /** Default complete detail; summary omits provider diagnostics and candidate capabilities. */
+  status(options?: {
+    readonly signal?: AbortSignal;
+    readonly detail?: BinarySessionDetail;
+  }): Promise<JsonValue>;
   activeTarget(): BinaryTarget | undefined;
+  /** Read a snapshot with failed descriptors retained for session cleanup retry. */
+  readAnalysisSnapshot(
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<Result<AnalysisSnapshot, AnalysisError>>;
   exportAnalysisSnapshot(): Result<AnalysisSnapshot, AnalysisError>;
   importAnalysisSnapshot(
     snapshot: AnalysisSnapshot,

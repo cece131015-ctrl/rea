@@ -133,7 +133,7 @@ it("publishes no registration environment when REA_JADX_MCP_JAR is unset", async
   });
 });
 
-it("reports a relative REA_JADX_MCP_JAR as invalid configuration, not as unset", async () => {
+it("reports a relative REA_JADX_MCP_JAR as a rejected selection, not an unset one", async () => {
   const inspection = await inspectJadxProvider({
     REA_JADX_MCP_JAR: "tools/jadx-headless-mcp.jar",
   });
@@ -148,14 +148,14 @@ it("reports a relative REA_JADX_MCP_JAR as invalid configuration, not as unset",
         name: "configuration",
         ok: false,
         code: "open_options_invalid",
-        detail: expect.stringContaining(
-          "REA_JADX_MCP_JAR must be an absolute path; received tools/jadx-headless-mcp.jar.",
-        ),
-        remediation: expect.stringContaining("REA_JADX_MCP_JAR"),
         classification: "config_drift",
       },
     ],
   });
+  expect(inspection.checks[0]?.detail).toContain(
+    'REA_JADX_MCP_JAR must be an absolute path; received "tools/jadx-headless-mcp.jar".',
+  );
+  expect(inspection.checks[0]?.remediation).toContain("REA_JADX_MCP_JAR");
 });
 
 it("publishes no registration environment when the configured JAR fails validation", async () => {

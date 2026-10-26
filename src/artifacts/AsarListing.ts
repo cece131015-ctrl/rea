@@ -1,7 +1,8 @@
 import { setImmediate } from "node:timers/promises";
 import { z } from "zod";
 
-import { ArtifactReaderFailure } from "./ArtifactReader.js";
+import { ArtifactReaderFailure, type ArtifactEntry } from "./ArtifactReader.js";
+import { assertAsarReadActive } from "./AsarFailure.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 
 /** Capacity for expanded paths and listing records, independent of packed bytes. */
@@ -22,11 +23,26 @@ const nodeSchema = z.looseObject({
     .looseObject({ algorithm: z.string(), hash: z.string() })
     .optional(),
 });
-export type AsarMetadata = z.infer<typeof nodeSchema>;
-export interface AsarListedEntry {
-  readonly path: string;
-  readonly metadata: AsarMetadata;
-}
+type AsarListedFacts = Pick<
+  ArtifactEntry,
+  "declaredIntegrity" | "executable" | "unpacked"
+> & { readonly path: string };
+export type AsarListedEntry = AsarListedFacts &
+  (
+    | { readonly kind: "directory" | "symlink"; readonly size: number | null }
+    | {
+        readonly kind: "file";
+        readonly size: number;
+        readonly packedOffset: number | undefined;
+      }
+  );
+
+const parseArchiveOffset = (value: string | undefined): number | undefined => {
+  if (value === undefined || !/^(?:0|[1-9][0-9]*)$/u.test(value))
+    return undefined;
+  const offset = Number(value);
+  return Number.isSafeInteger(offset) ? offset : undefined;
+};
 
 function* ownChildren(files: Record<string, unknown>) {
   for (const name in files)
@@ -48,11 +64,7 @@ export const readAsarListing = async (
   while (pending.length > 0) {
     if (examined++ % 128 === 0) {
       await setImmediate();
-      if (signal?.aborted)
-        throw new ArtifactReaderFailure(
-          "cancelled",
-          "ASAR operation cancelled",
-        );
+      assertAsarReadActive(signal);
     }
     const frame = pending.at(-1);
     if (frame === undefined) break;
@@ -97,7 +109,29 @@ export const readAsarListing = async (
         "format",
         "ASAR entry has no directory, link or file metadata",
       );
-    entries.push({ path, metadata });
+    const facts: AsarListedFacts = {
+      path,
+      executable: metadata.executable === true,
+      unpacked: metadata.unpacked === true,
+      declaredIntegrity:
+        metadata.integrity?.algorithm === "SHA256" &&
+        /^[a-f0-9]{64}$/u.test(metadata.integrity.hash)
+          ? { algorithm: "sha256", digest: metadata.integrity.hash }
+          : null,
+    };
+    if (metadata.files !== undefined || metadata.link !== undefined)
+      entries.push({
+        ...facts,
+        kind: metadata.files !== undefined ? "directory" : "symlink",
+        size: metadata.size ?? null,
+      });
+    else if (metadata.size !== undefined)
+      entries.push({
+        ...facts,
+        kind: "file",
+        size: metadata.size,
+        packedOffset: parseArchiveOffset(metadata.offset),
+      });
     if (metadata.files !== undefined)
       pending.push({
         parent: path,

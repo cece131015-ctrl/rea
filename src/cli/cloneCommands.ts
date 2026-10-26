@@ -15,11 +15,10 @@ import {
 import {
   LOCAL_APPLICATION_PROVIDER,
   WEB_MIRROR_EXPORT_PROVIDER,
-} from "../application/InvestigationProviders.js";
+} from "../domain/investigationProviders.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
-import { createBrowserScenarioProvider } from "../composition/browserScenario.js";
 import { cloneWebsiteInputSchema } from "../domain/webMirror.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { withCommandCancellation } from "./commandCancellation.js";
@@ -77,8 +76,8 @@ export const registerCloneCommands = (
             resources,
             WEB_MIRROR_EXPORT_PROVIDER.id,
             "export_web_mirror",
-            "Website mirror resources",
             signal,
+            "Website mirror resources",
           );
         }),
       ),
@@ -118,8 +117,13 @@ export const registerCloneCommands = (
     }),
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
-        logCliCommand(logger, CLI_COMMANDS.cloneWebsite, () => {
-          const browser = createBrowserScenarioProvider(environment);
+        logCliCommand(logger, CLI_COMMANDS.cloneWebsite, async () => {
+          // Load Playwright only for this command, not during CLI startup.
+          const browser =
+            await import("../composition/browserScenario.js").then(
+              ({ createBrowserScenarioProvider }) =>
+                createBrowserScenarioProvider(environment),
+            );
           const resources = new ArtifactResourceScope();
           return finishAnalysisCommand(
             () =>
@@ -151,8 +155,8 @@ export const registerCloneCommands = (
             },
             WEB_MIRROR_EXPORT_PROVIDER.id,
             "clone_website",
-            "Website clone resources",
             signal,
+            "Website clone resources",
           );
         }),
       ),
@@ -208,9 +212,12 @@ export const registerCloneCommands = (
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.cloneLocalApplication, () => {
           const resources = new ArtifactResourceScope();
-          // A path-like selection is resolved; anything else is a name.
+          // Path syntax (a separator, or "." / "..") is resolved; anything
+          // else is a name, including dot-prefixed names such as ".NET".
           const selection =
-            /[/\\]/u.test(args.application) || args.application.startsWith(".")
+            /[/\\]/u.test(args.application) ||
+            args.application === "." ||
+            args.application === ".."
               ? absolute(args.application)
               : args.application;
           return finishAnalysisCommand(
@@ -232,8 +239,8 @@ export const registerCloneCommands = (
             resources,
             LOCAL_APPLICATION_PROVIDER.id,
             "clone_local_application",
-            "Local application copy resources",
             signal,
+            "Local application copy resources",
           );
         }),
       ),

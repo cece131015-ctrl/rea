@@ -6,8 +6,6 @@ import {
   procedureIdentitySchema,
   parseDocuments,
   parseListCount,
-  parseNames,
-  parseProcedures,
   parseRelatedAddresses,
   parseSegments,
 } from "./hopperValues.js";
@@ -22,27 +20,13 @@ describe("Hopper boundary values", () => {
     expect(addressDistance("0x0", "0x20000000000000")).toBeNull();
   });
 
-  it("parses Hopper's address-keyed name and string maps", () => {
-    expect(parseNames({ "0x1000": "_main" })).toEqual({
-      ok: true,
-      value: [{ address: "0x1000", name: "_main" }],
-    });
+  it("counts Hopper's address-keyed string maps", () => {
     expect(
       parseListCount({ "0x1000": "hello", "0x2000": "world" }, "strings"),
     ).toEqual({ ok: true, value: 2 });
   });
 
   it("parses direct and wrapped protocol shapes", () => {
-    expect(parseProcedures({ procedures: { "0x1": "main" } })).toEqual({
-      ok: true,
-      value: [{ address: "0x1", name: "main" }],
-    });
-    expect(parseNames({ names: [{ address: "0x2", name: "label" }] }).ok).toBe(
-      true,
-    );
-    expect(parseNames({ items: [{ address: "0x2", value: "label" }] }).ok).toBe(
-      false,
-    );
     expect(parseRelatedAddresses({ callers: ["0x3"] }, "callers")).toEqual({
       ok: true,
       value: ["0x3"],
@@ -78,8 +62,6 @@ describe("Hopper boundary values", () => {
   });
 
   it.each([
-    ["procedures", () => parseProcedures(["not-a-map"])],
-    ["names", () => parseNames([{ address: 1, name: "bad" }])],
     ["relations", () => parseRelatedAddresses([1], "callees")],
     ["segments", () => parseSegments([{ name: 1 }])],
     ["documents", () => parseDocuments([1])],
@@ -251,3 +233,32 @@ describe("provider-neutral inclusive function body evidence", () => {
     ).toBe(false);
   });
 });
+
+it.each(["procedures", "strings"])(
+  "counts every own entry of direct and wrapped %s maps",
+  (property) => {
+    for (const text of [
+      '{"__proto__":"observed"}',
+      '{"__proto__":"observed","0x1000":"one"}',
+    ]) {
+      const source = JSON.parse(text);
+      const count = Object.keys(source).length;
+      expect(parseListCount(source, property)).toEqual({
+        ok: true,
+        value: count,
+      });
+      expect(parseListCount({ [property]: source }, property)).toEqual({
+        ok: true,
+        value: count,
+      });
+      expect(JSON.stringify(source)).toBe(text);
+    }
+    expect(parseListCount({ [property]: [] }, property)).toEqual({
+      ok: true,
+      value: 0,
+    });
+    expect(parseListCount({}, property)).toEqual({ ok: true, value: 0 });
+    for (const value of [null, "not a list", 3, false])
+      expect(parseListCount(value, property).ok).toBe(false);
+  },
+);

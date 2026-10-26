@@ -6,9 +6,9 @@ import {
   createEvidenceBundle,
   createImmutableEvidenceBundle,
   NonCanonicalEvidenceBundleError,
-  describeEvidenceBundleFailure,
   evidenceBundleForTarget,
   parseEvidenceBundle,
+  safeParseEvidenceBundle,
 } from "./evidenceBundle.js";
 import {
   createResidualUnknown,
@@ -30,12 +30,14 @@ describe("evidence bundle failure classification", () => {
       }),
     );
     const canonical = createEvidenceBundle(records);
-    expect(() =>
-      parseEvidenceBundle({
-        ...canonical,
-        records: [...canonical.records].reverse(),
-      }),
-    ).toThrow(NonCanonicalEvidenceBundleError);
+    const parsed = safeParseEvidenceBundle({
+      ...canonical,
+      records: [...canonical.records].reverse(),
+    });
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.kind).toBe("invalid-bundle");
+    expect(parsed.error.cause).toBeInstanceOf(NonCanonicalEvidenceBundleError);
   });
 
   it("treats only authenticated standalone Evidence as the wrong input kind", () => {
@@ -44,14 +46,18 @@ describe("evidence bundle failure classification", () => {
       parameters: {},
       result: { observed: true },
     });
-    const single = describeEvidenceBundleFailure(record, new Error("bundle"));
-    expect(single).toMatchObject({ kind: "single-record" });
+    const single = safeParseEvidenceBundle(record);
+    expect(single.ok).toBe(false);
+    if (single.ok) return;
+    expect(single.error.kind).toBe("single-record");
 
-    const tampered = describeEvidenceBundleFailure(
-      { ...record, normalized_result: { observed: false } },
-      new Error("bundle"),
-    );
-    expect(tampered).toMatchObject({ kind: "invalid-bundle" });
+    const tampered = safeParseEvidenceBundle({
+      ...record,
+      normalized_result: { observed: false },
+    });
+    expect(tampered.ok).toBe(false);
+    if (tampered.ok) return;
+    expect(tampered.error.kind).toBe("invalid-bundle");
   });
 });
 

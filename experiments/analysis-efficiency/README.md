@@ -1,5 +1,62 @@
 # Analysis efficiency measurements
 
+The [2026-10-21 coverage reconciliation](coverage-review-20261021.md) maps all
+46 source directories to concrete workflow evidence, including original feature
+PRs, historical no-benefit results and remaining verification boundaries.
+
+The [GGUF validation checkpoint](model-utf8-validation.md) removes decoding of
+omitted strings while retaining full UTF-8 validation. It records real-model
+phase gains, unchanged task token costs and the higher main-task memory peak.
+
+The [WAT framing checkpoint](wasm-string-framing.md) measures structural scanning
+on real SQLite and VS Code components, with unchanged Evidence and token costs,
+small whole-task timing gains and no memory improvement.
+
+The [native inventory view checkpoint](native-inventory-views.md) compares
+complete delivery with summaries and selected rows on real `true` and jq
+inventories, including oversized-response recovery, portable old Evidence,
+CLI/MCP parity, tokenizer estimates and independent-engine variation.
+
+The [retained-capture validation checkpoint](retained-capture-validation.md)
+reconciles the earlier audit queue and measures immutable historical-capture
+validation reuse on public compact and large qlogs, including first-view costs,
+small-input limits and unchanged Evidence delivery.
+
+The [Ghidra Evidence projection checkpoint](ghidra-evidence-projection.md)
+measures removal of redundant raw copies on real `true` and jq workflows,
+with complete provenance, unchanged response budgets, native CLI/MCP checks
+and explicit cold-analysis variance.
+
+For Hopper literal string queries, see the [decoded-record checkpoint](hopper-string-records.md).
+It measures record reuse through real Linux CLI/MCP workflows, preserving
+native recognition gaps, guard-stopped attempts and negative whole-task costs.
+
+The [Linux embedding-runtime follow-up](hopper-linux-python-runtime.md) checks
+actual clean setup, dependency repair and normal-user analysis, retaining
+failed attempts and distinguishing prerequisite correctness from speedups.
+
+For JEB on Linux, see the [CE native audit](jeb-linux-native.md). It qualifies
+the direct headless launch route and measures selected function reads through
+real CLI and production stdio MCP, preserving timeout attempts and the limits
+of wrapper-cache and token claims.
+
+For Apktool locale queries, see the
+[shared-decode and table-only checkpoint](apktool-string-tables.md). It separates
+the existing decode reuse from duplicate string delivery, with three real APKs,
+CLI/MCP parity, whole-task estimates and negative timing results.
+
+For immutable imported native/JavaScript parents, see the
+[validation-reuse checkpoint](immutable-parent-validation.md). It measures the
+owning format change with the existing retained-query driver, including first
+view costs, small cases, unchanged token estimates, and noisy whole-task results.
+
+For authentic old Evidence and mixed investigations, see the
+[retained-query checkpoint](retained-investigation-workflows.md).
+`retained-investigation.mjs` compares existing complete delivery with selected
+pages, including capacity-refusal recovery and original-record round trips.
+It records negative model results and separates imported-format validation work
+from the query contract.
+
 For genuine Fiddler captures, see the [SAZ selection checkpoint](saz-selection-workflows.md).
 `measure.mjs --saz-selection baseline|focused|retained` compares default complete
 delivery (including retained-reference recovery), caller-selected ordinals, and

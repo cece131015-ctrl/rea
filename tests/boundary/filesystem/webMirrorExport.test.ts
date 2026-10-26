@@ -10,7 +10,6 @@ import { selectMirrorCapture } from "../../../src/browser/assets/MirrorCapture.j
 import { publishWebMirror } from "../../../src/browser/assets/PublishWebMirror.js";
 import { PLAYWRIGHT_RESPONSE_BODY_PROVENANCE_LIMITATION } from "../../../src/domain/browserNetworkEvidence.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
-import { jsonValueSchema } from "../../../src/domain/jsonValue.js";
 import {
   webMirrorExportResultSchema,
   webMirrorManifestSchema,
@@ -56,13 +55,16 @@ const site: readonly FixtureWebResource[] = [
   },
 ];
 
-const captureEvidence = (resources: readonly FixtureWebResource[] = site) =>
+const captureEvidence = (
+  resources: readonly FixtureWebResource[] = site,
+  entryUrl?: string,
+) =>
   createEvidence(
     undefined,
     { id: "source-fixture", name: "Source fixture", version: "1" },
     {
       operation: "capture_browser_scenario",
-      result: jsonValueSchema.parse(webResourceScenarioFixture(resources)),
+      result: webResourceScenarioFixture(resources, entryUrl),
       parameters: {},
       confidence: "observed",
       authority: "controlled-replay",
@@ -126,11 +128,15 @@ describe("export_web_mirror publication", () => {
     )[0];
     expect(cssPath).toMatch(/^site~q[0-9a-f]{12}\.css$/u);
     expect(
-      await readFile(join(out, "files/https_fixture.test_443/index.html")),
-    ).toEqual(html);
+      (
+        await readFile(join(out, "files/https_fixture.test_443/index.html"))
+      ).equals(html),
+    ).toBe(true);
     expect(
-      await readFile(join(out, "files/https_fixture.test_443/img/logo.png")),
-    ).toEqual(logo);
+      (
+        await readFile(join(out, "files/https_fixture.test_443/img/logo.png"))
+      ).equals(logo),
+    ).toBe(true);
     expect(
       await readFile(
         join(out, "view/https_fixture.test_443/index.html"),
@@ -211,7 +217,7 @@ describe("export_web_mirror ownership", () => {
         input.output_directory,
         broken,
         { path: input.capture_path, sha256: "a".repeat(64) },
-        { resources, error },
+        { operation: "export_web_mirror", resources, error },
       ),
     ).rejects.toMatchObject({ reason: "integrity" });
     expect(await readdir(root)).toEqual(["capture.json"]);
@@ -223,7 +229,12 @@ describe("export_web_mirror ownership", () => {
         input.output_directory,
         capture,
         { path: input.capture_path, sha256: "a".repeat(64) },
-        { resources, error, signal: controller.signal },
+        {
+          operation: "export_web_mirror",
+          resources,
+          error,
+          signal: controller.signal,
+        },
       ),
     ).rejects.toBeDefined();
     expect(await readdir(root)).toEqual(["capture.json"]);
@@ -237,11 +248,28 @@ describe("export_web_mirror ownership", () => {
     const result = await publishWebMirror(
       out,
       selectMirrorCapture(evidence),
-      { path: "capture.json", sha256: sha256(persisted), persist: persisted },
-      { resources, error: webMirrorExportError("clone_website") },
+      {
+        path: "capture.json",
+        sha256: sha256(persisted),
+        persist: {
+          bytes: persisted.byteLength,
+          // Bounded parts, as a clone writes captures beyond V8's string limit.
+          parts: () => [
+            persisted.toString("utf8", 0, 7),
+            persisted.toString("utf8", 7),
+          ],
+        },
+      },
+      {
+        operation: "clone_website",
+        resources,
+        error: webMirrorExportError("clone_website"),
+      },
     );
     expect(result.capture.path).toBe(join(out, "capture.json"));
-    expect(await readFile(join(out, "capture.json"))).toEqual(persisted);
+    expect((await readFile(join(out, "capture.json"))).equals(persisted)).toBe(
+      true,
+    );
     expect(result.capture.source_evidence_id).toBe(evidence.evidence_id);
   });
 });
@@ -288,9 +316,91 @@ describe("export_web_mirror view eligibility", () => {
       "non-ASCII bytes under another declared charset",
     );
     expect(
-      await readFile(
-        join(input.output_directory, "files/https_fixture.test_443/latin.html"),
+      (
+        await readFile(
+          join(
+            input.output_directory,
+            "files/https_fixture.test_443/latin.html",
+          ),
+        )
+      ).equals(latin),
+    ).toBe(true);
+  });
+});
+
+const exportResult = async (capture: unknown) => {
+  const { input, resources } = await setup(capture);
+  const result = await exportWebMirror(input, resources);
+  if (!result.ok) throw result.error;
+  return {
+    input,
+    value: webMirrorExportResultSchema.parse(result.value.normalized_result),
+  };
+};
+
+const page = Buffer.from(`<!doctype html><p>page</p>`);
+
+describe("export_web_mirror entry selection", () => {
+  it("never opens a third-party frame when the start document is unavailable", async () => {
+    const { value } = await exportResult(
+      captureEvidence([
+        { url: "https://fixture.test/", status: 200, resourceType: "document" },
+        {
+          url: "https://ads.example/frame.html",
+          bytes: page,
+          resourceType: "document",
+          mediaType: "text/html",
+        },
+      ]),
+    );
+    expect(value.entry).toBeNull();
+    expect(value.limitations).toContain(
+      "No captured HTML document matched the start navigation, so no entry page was generated.",
+    );
+  });
+
+  it("opens the start step's same-origin document after a client-side route change", async () => {
+    const { value } = await exportResult(
+      captureEvidence(
+        [
+          {
+            url: "https://fixture.test/",
+            bytes: page,
+            resourceType: "document",
+            mediaType: "text/html",
+          },
+        ],
+        "https://fixture.test/app/home",
       ),
-    ).toEqual(latin);
+    );
+    expect(value.entry?.url).toBe("https://fixture.test/");
+    expect(value.limitations.join(" ")).toContain(
+      "The start navigation ended at https://fixture.test/app/home, which matches no captured document",
+    );
+  });
+});
+
+describe("export_web_mirror resources without an absolute URL", () => {
+  it("keeps their exact files and still mirrors the rest", async () => {
+    const { value } = await exportResult(
+      captureEvidence([
+        {
+          url: "https://fixture.test/",
+          bytes: page,
+          resourceType: "document",
+          mediaType: "text/html",
+        },
+        {
+          url: "inline-style",
+          bytes: Buffer.from("a{b:url(c.png)}"),
+          resourceType: "stylesheet",
+          mediaType: "text/css",
+        },
+      ]),
+    );
+    expect(value.coverage).toMatchObject({ files: 2, views: 1 });
+    expect(value.limitations.join(" ")).toContain(
+      "have no absolute URL to resolve their references against",
+    );
   });
 });

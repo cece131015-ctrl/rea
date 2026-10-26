@@ -43,7 +43,7 @@ const createPcapToolFixture = async (root: string) => {
   );
   await writeFile(
     capinfos,
-    `#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'Capinfos (Wireshark) 4.6.6-emulated\\n'; exit 0; fi\nprintf '%s\\n' ${quote(`File type: pcap\nFile encapsulation: Ethernet\nNumber of packets: 132\nSHA256: ${sha}`)}\n`,
+    `#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'Capinfos (Wireshark) 4.6.6-emulated\\n'; exit 0; fi\nprintf '%s\\n' ${quote(`File type: pcap\nFile encapsulation: Ethernet\nPacket size limit: file hdr: 262144 bytes\nPacket size limit: inferred: 128 bytes\nNumber of packets: 132\nSHA256: ${sha}`)}\n`,
     { mode: 0o755 },
   );
   const environment = {
@@ -72,6 +72,7 @@ it.runIf(process.platform === "linux")(
     );
     const parent = parseEvidence(JSON.parse(complete.stdout));
     expect(parent.normalized_result).toMatchObject({
+      snapshot_length: 262144,
       tls_sni_count: 132,
       tls_sni_values: expect.arrayContaining(["host131.example"]),
       dns_queries: [{ query: "many.example", response_address_count: 132 }],
@@ -87,6 +88,7 @@ it.runIf(process.platform === "linux")(
     expect(summary).toMatchObject({
       parent_evidence_id: parent.evidence_id,
       summary: {
+        snapshot_length: 262144,
         tls_sni_count: 132,
         dns_query_count: 1,
         retained_counts: { tls_sni_values: 132 },

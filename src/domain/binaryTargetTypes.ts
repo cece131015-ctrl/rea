@@ -1,3 +1,4 @@
+import type { DolHeader } from "./gamecubeDol.js";
 import type { ZipPackageFormat } from "./zipPackageFormat.js";
 
 /** Provider-neutral CPU families detected from headers or explicitly selected raw loads. */
@@ -6,6 +7,7 @@ export const BINARY_ARCHITECTURES = [
   "x86_64",
   "arm",
   "arm64",
+  "arm64_32",
   "mips",
   "6502",
   "riscv",
@@ -63,7 +65,7 @@ export const isElfMetadataArchitecture = (
 /** Recognized family with no ELF metadata member; the header alone is the fact. */
 export type HeaderArchitecture = Exclude<
   BinaryArchitecture,
-  ElfMetadataArchitecture | RawOnlyArchitecture | "hexagon"
+  ElfMetadataArchitecture | RawOnlyArchitecture | "hexagon" | "arm64_32"
 >;
 
 /** Raw ELF facts; family recognition does not establish ISA or ABI support. */
@@ -184,6 +186,15 @@ export type BinaryTarget =
       readonly executableRole?: never;
       readonly managed?: never;
     })
+  | (BinaryTargetIdentity & {
+      readonly kind: "executable";
+      readonly format: "mach-o";
+      readonly architecture: "arm64_32";
+      readonly availableArchitectures: readonly "arm64_32"[];
+      readonly universalSlice?: never;
+      readonly executableRole?: never;
+      readonly managed?: never;
+    })
   | (ExecutableTarget & {
       readonly format: "mach-o" | "elf" | "dos-mz" | "dos-com";
       readonly universalSlice?: never;
@@ -210,6 +221,22 @@ export type BinaryTarget =
       readonly executableRole?: never;
       readonly managed?: never;
     })
+  | (BinaryTargetIdentity & {
+      readonly kind: "executable";
+      readonly format: "gamecube-dol";
+      /** Fixed by the DOL selection; the header does not carry a CPU family. */
+      readonly architecture: "powerpc";
+      readonly availableArchitectures: readonly ["powerpc"];
+      readonly byteOrder: "big";
+      readonly bits: 32;
+      /** Canonical hex entry taken from the DOL header. */
+      readonly entryPoint: string;
+      readonly entryPointSource: "dol-header";
+      /** Validated header: used sections, BSS, and BSS-overlapping data slots. */
+      readonly dol: DolHeader;
+      readonly executableRole?: never;
+      readonly managed?: never;
+    })
   | (ExecutableTarget & {
       readonly format: "pe";
       /** Original COFF machine; undefined means this header fact is unavailable. */
@@ -232,7 +259,12 @@ export type BinaryTarget =
   | (BinaryTargetIdentity &
       NonExecutableMetadata & {
         readonly kind: "archive";
-        readonly format: ZipPackageFormat | "asar" | "dmg" | "pkg";
+        readonly format:
+          | ZipPackageFormat
+          | "asar"
+          | "godot-pck"
+          | "dmg"
+          | "pkg";
       })
   | (BinaryTargetIdentity &
       NonExecutableMetadata & {

@@ -6,6 +6,9 @@ import type { BrowserContext } from "playwright-core";
 
 import type { BrowserScenario } from "../domain/browserScenario.js";
 import type { BrowserScenarioAction } from "../domain/browserScenarioValues.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
+import { PLAYWRIGHT_BROWSER_SCENARIO_PROVIDER_IDENTITY } from "./providerIdentities.js";
+import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
 import type { BrowserScenarioSessionPort } from "./BrowserScenarioSessionPort.js";
@@ -13,6 +16,7 @@ import { BrowserScenarioSecrets } from "./BrowserScenarioSecrets.js";
 import {
   failBrowserScenarioOperation,
   openPlaywrightScenarioBrowser,
+  type PlaywrightScenarioBrowserReleaseGate,
   type OpenedScenarioBrowser,
 } from "./PlaywrightScenarioBrowser.js";
 import { performPlaywrightScenarioAction } from "./PlaywrightScenarioActions.js";
@@ -78,20 +82,27 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
   readonly version: string;
   readonly initialUrl: string;
   private readonly secrets: BrowserScenarioSecrets;
+  private readonly startOrigin: string;
   private readonly eventCapture: PlaywrightScenarioEvents;
   private readonly storage: PlaywrightScenarioStorage | undefined;
   private readonly serviceWorkers: PlaywrightScenarioServiceWorkers | undefined;
   private readonly signal: AbortSignal | undefined;
   #storageReleased = false;
+  #storageCloseCompleted = false;
+  #storageStopConfirmed = false;
   #stopLoading = false;
+  #stopRevision = 0;
   readonly cleanupLease: AnalysisCleanupLease;
-  #policyStopsLoading = false;
+  #navigationStopConfirmed = false;
+  readonly #browserReleaseGate: PlaywrightScenarioBrowserReleaseGate;
+  readonly #onAbort = (): void => this.#recordStopRequest();
 
   private constructor(
     private readonly opened: OpenedScenarioBrowser,
     options: {
       readonly mode: BrowserScenario["browser"]["mode"];
       readonly secrets: BrowserScenarioSecrets;
+      readonly startOrigin: string;
       readonly eventCapture: PlaywrightScenarioEvents;
       readonly storage: PlaywrightScenarioStorage | undefined;
       readonly serviceWorkers: PlaywrightScenarioServiceWorkers | undefined;
@@ -102,10 +113,20 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
     this.processOwnership =
       options.mode === "launch" ? "provider-owned" : "external";
     this.secrets = options.secrets;
+    this.startOrigin = options.startOrigin;
     this.eventCapture = options.eventCapture;
     this.storage = options.storage;
     this.serviceWorkers = options.serviceWorkers;
     this.signal = options.signal;
+    const session = this;
+    this.#browserReleaseGate = {
+      get revision() {
+        return session.#stopRevision;
+      },
+      run: () => this.#fulfillNavigationStopRequest(),
+    };
+    if (this.signal?.aborted === true) this.#recordStopRequest();
+    else this.signal?.addEventListener("abort", this.#onAbort, { once: true });
     this.version = opened.browser.version();
     this.initialUrl = opened.page.url();
     this.cleanupLease = new AnalysisCleanupLease(
@@ -129,9 +150,9 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
     },
   ): Promise<PlaywrightScenarioSession> {
     throwIfScenarioCancelled(options.signal);
-    const secrets = BrowserScenarioSecrets.resolve(scenario, environment);
-    if (secrets === undefined)
-      throw new BrowserObservationError(OPERATION, "secret_unavailable");
+    const resolved = BrowserScenarioSecrets.resolve(scenario, environment);
+    if (!resolved.ok) throw resolved.error;
+    const secrets = resolved.value;
     const startedAt = performance.now();
     const openingCleanup = new Set<AnalysisCleanupLease>();
     const opening = openPlaywrightScenarioBrowser(scenario, environment, {
@@ -206,7 +227,7 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
             waitUntil: "load",
             timeout: 0,
           }),
-        undefined,
+        scenario.command_timeout_ms,
         options.signal,
       );
       await withPlaywrightExecutionBoundary(
@@ -271,6 +292,7 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
             opened.page,
             scenario.browser.cdp_endpoint,
             scenario.browser.target_id,
+            scenario.command_timeout_ms,
           )
         : undefined;
     try {
@@ -308,6 +330,7 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
       return new PlaywrightScenarioSession(opened, {
         mode: scenario.browser.mode,
         secrets,
+        startOrigin: new URL(scenario.start_url.url).origin,
         eventCapture: events,
         storage,
         serviceWorkers,
@@ -406,6 +429,10 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
     return this.eventCapture.limitations();
   }
 
+  storageLimitations(): readonly string[] {
+    return this.storage?.limitations() ?? [];
+  }
+
   async perform(
     action: BrowserScenarioAction,
     signal?: AbortSignal,
@@ -416,6 +443,8 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
           page: this.opened.page,
           action,
           secrets: this.secrets,
+          startOrigin: this.startOrigin,
+          signal,
         }),
       "timeout_ms" in action ? action.timeout_ms : undefined,
       signal,
@@ -443,7 +472,7 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
       undefined,
       signal,
     );
-    return withPlaywrightExecutionBoundary(
+    const artifacts = await withPlaywrightExecutionBoundary(
       () =>
         capturePlaywrightStepArtifacts({
           context: this.opened.context,
@@ -454,10 +483,31 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
       undefined,
       signal,
     );
+    try {
+      await withPlaywrightExecutionBoundary(
+        () => this.serviceWorkers?.assertBlocked() ?? Promise.resolve(),
+        undefined,
+        signal,
+      );
+    } catch (cause: unknown) {
+      const failure =
+        cause instanceof AnalysisError
+          ? cause
+          : new ProviderAdapterError(
+              PLAYWRIGHT_BROWSER_SCENARIO_PROVIDER_IDENTITY.id,
+              OPERATION,
+              { cause },
+            );
+      failure.retainDiagnostics({
+        collected_artifacts: jsonValueSchema.parse(artifacts),
+      });
+      throw failure;
+    }
+    return artifacts;
   }
 
   async close(stopLoading = this.signal?.aborted === true) {
-    this.#stopLoading ||= stopLoading;
+    if (stopLoading) this.#recordStopRequest();
     try {
       await withPlaywrightExecutionBoundary(
         () => this.cleanupLease.release(),
@@ -480,31 +530,46 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
   }
 
   async #closeResources(): Promise<void> {
-    const stopLoading = this.#stopLoading || this.signal?.aborted === true;
+    const stopLoading = this.#stopLoading;
     let storageFailure: { readonly cause: unknown } | undefined;
     let policyFailure: { readonly cause: unknown } | undefined;
     let browserFailure: { readonly cause: unknown } | undefined;
-    if (stopLoading && this.storage === undefined)
-      this.#policyStopsLoading = true;
-    if (!this.#storageReleased) {
+    if (!this.#storageCloseCompleted) {
       try {
         const result = await this.storage?.close(stopLoading);
-        if (stopLoading && result?.loadingStopped !== true)
-          this.#policyStopsLoading = true;
+        this.#storageStopConfirmed = result?.loadingStopped === true;
+        this.#storageCloseCompleted = true;
       } catch (failure: unknown) {
         storageFailure = { cause: failure };
-        if (stopLoading) this.#policyStopsLoading = true;
       }
     }
     try {
       if (!this.opened.cleanup.browserClosed)
-        await this.serviceWorkers?.close(this.#policyStopsLoading);
+        await this.serviceWorkers?.close(
+          stopLoading && !this.#storageStopConfirmed,
+        );
+      if (
+        stopLoading &&
+        !this.#storageStopConfirmed &&
+        this.serviceWorkers !== undefined
+      )
+        this.#navigationStopConfirmed = true;
     } catch (failure: unknown) {
       policyFailure = { cause: failure };
     }
     if (policyFailure === undefined) {
       try {
-        await this.opened.cleanup.release(() => this.eventCapture.finish());
+        await this.#fulfillNavigationStopRequest();
+      } catch (failure: unknown) {
+        policyFailure = { cause: failure };
+      }
+    }
+    if (policyFailure === undefined) {
+      try {
+        await this.opened.cleanup.release(
+          () => this.eventCapture.finish(),
+          this.#browserReleaseGate,
+        );
       } catch (failure: unknown) {
         browserFailure = { cause: failure };
       }
@@ -515,7 +580,10 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
         browserFailure = { cause: failure };
       }
     }
-    if (this.opened.cleanup.browserClosed) this.#storageReleased = true;
+    if (this.opened.cleanup.browserClosed) {
+      this.#storageReleased = true;
+      this.signal?.removeEventListener("abort", this.#onAbort);
+    }
     throwCleanupFailures([
       ...(policyFailure === undefined ? [] : [policyFailure.cause]),
       ...(this.#storageReleased || storageFailure === undefined
@@ -523,6 +591,33 @@ export class PlaywrightScenarioSession implements BrowserScenarioSessionPort {
         : [storageFailure.cause]),
       ...(browserFailure === undefined ? [] : [browserFailure.cause]),
     ]);
+  }
+
+  #recordStopRequest(): void {
+    if (!this.#stopLoading) this.#stopRevision += 1;
+    this.#stopLoading = true;
+  }
+
+  async #fulfillNavigationStopRequest(): Promise<void> {
+    if (
+      !this.#stopLoading ||
+      this.#storageStopConfirmed ||
+      this.#navigationStopConfirmed ||
+      this.mode === "launch"
+    )
+      return;
+    if (this.serviceWorkers !== undefined) {
+      await this.serviceWorkers.close(true);
+    } else if (this.opened.page.isClosed()) {
+      this.#navigationStopConfirmed = true;
+      return;
+    } else {
+      const frame = this.opened.page.mainFrame();
+      if (frame.isDetached())
+        throw new Error("Cannot stop navigation through a detached main frame");
+      await frame.evaluate("globalThis.stop()");
+    }
+    this.#navigationStopConfirmed = true;
   }
 
   redactError(error: unknown): string {

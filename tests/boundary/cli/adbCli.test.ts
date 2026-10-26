@@ -1,10 +1,11 @@
 import { chmod, lstat, readFile, unlink } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { basename, dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { expect, it, onTestFinished } from "vitest";
 import { z } from "zod";
 
 import { toolContract } from "../../../src/contracts/toolContracts.js";
+import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import {
   execFileOutput,
   execFileOutputFailure,
@@ -83,6 +84,51 @@ exit 1
   expect(await readFile(workspace.path("calls"), "utf8")).toBe("\nshell\n");
 });
 
+it.skipIf(process.platform === "win32")(
+  "reports the file placed inside a push destination directory and preserves executable staging",
+  async () => {
+    const workspace = await createTestWorkspace("rea-adb-directory-push-cli-");
+    onTestFinished(() => removeTestWorkspace(workspace.root));
+    const source = await workspace.write("payload.bin", "#!/bin/sh\n");
+    await chmod(source, 0o755);
+    const digest = createHash("sha256").update("#!/bin/sh\n").digest("hex");
+    const adb = await workspace.write(
+      "adb",
+      `#!/bin/sh
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$1" = version ]; then printf 'Android Debug Bridge version 1.0.41\\nVersion 34.0.5-cli\\n'; exit 0; fi
+if [ "$1" = -s ] && [ "$3" = shell ] && [ "$4" = test ]; then
+  if [ "$5" = -d ] && [ "$6" = /data/local/tmp/drop/ ]; then exit 0; fi
+  if [ "$5" = -e ]; then exit 1; fi
+fi
+if [ "$1" = -s ] && [ "$3" = push ]; then ls -ld "$4" | cut -c1-10 > "$root/staged-mode"; printf '%s' "$5" > "$root/push-target"; exit 0; fi
+if [ "$1" = -s ] && [ "$4" = sha256sum ]; then printf '%s  %s\\n' '${digest}' "$5"; exit 0; fi
+exit 1
+`,
+    );
+    await chmod(adb, 0o755);
+    const output = await serve(
+      ["push-adb-file", "device", source, "/data/local/tmp/drop/", "--json"],
+      { REA_ADB_PATH: adb },
+    );
+    expect(output.exitCode).toBe(0);
+    const evidence = JSON.parse(output.stdout) as {
+      parameters: { device_path: string };
+      normalized_result: { device_path: string };
+    };
+    expect(evidence.parameters.device_path).toBe("/data/local/tmp/drop/");
+    expect(evidence.normalized_result.device_path).toBe(
+      "/data/local/tmp/drop/payload.bin",
+    );
+    expect(await readFile(workspace.path("staged-mode"), "utf8")).toBe(
+      "-r-x--x--x\n",
+    );
+    expect(await readFile(workspace.path("push-target"), "utf8")).toBe(
+      "/data/local/tmp/drop/",
+    );
+  },
+);
+
 it.each([
   [
     ["inspect-adb-client", "--json"],
@@ -135,7 +181,7 @@ it.each(["string:key", ":", "string"])(
     expect(error).toMatchObject({
       code: "invalid_request",
       category: "invalid_input",
-      retryable: true,
+      retryable: false,
       remediation: { action: expect.any(String) },
     });
     expect(error.remediation.action).not.toBe("");
@@ -143,9 +189,120 @@ it.each(["string:key", ":", "string"])(
   },
 );
 
+it.each([16, 17])(
+  "enforces the activity extra count before host admission: %d entries",
+  async (count) => {
+    const root = await createTestTempDirectory("rea-adb-extra-limit-");
+    const missingAdb = join(root, "missing-adb");
+    const extras = Array.from({ length: count }, (_, index) => [
+      "--extra",
+      `string:key${index}:value${index}`,
+    ]).flat();
+    const result = await execFileOutput(
+      process.execPath,
+      [
+        "scripts/rea.mjs",
+        "start-adb-activity",
+        "emulator-5554",
+        "android.intent.action.VIEW",
+        ...extras,
+        "--json",
+      ],
+      {
+        env: { ...process.env, REA_ADB_PATH: missingAdb },
+        timeout: 20_000,
+        stopSignal: "SIGTERM",
+        maxBuffer: 1024 * 1024,
+      },
+    ).then(
+      (output) => ({ exitCode: 0, stdout: output.stdout }),
+      (cause: unknown) => {
+        const failure = execFileOutputFailure(cause);
+        if (failure === undefined || typeof failure.code !== "number")
+          throw cause;
+        return { exitCode: failure.code, stdout: failure.stdout };
+      },
+    );
+    if (count === 16) {
+      expectConfigurationRefusal(
+        result,
+        `The selected adb binary was not found: ${missingAdb}. Set REA_ADB_PATH`,
+      );
+    } else {
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        code: "VALIDATION_ERROR",
+        fieldErrors: [{ code: "too_big", path: "extra" }],
+      });
+    }
+    expect(result.exitCode, result.stdout).toBe(1);
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "starts an explicitly selected nested Android activity through the CLI",
+  async () => {
+    const workspace = await createTestWorkspace("rea-adb-nested-activity-cli-");
+    onTestFinished(() => removeTestWorkspace(workspace.root));
+    const adb = await workspace.write(
+      "adb",
+      `#!/bin/sh
+if [ "$1" = version ]; then
+  printf 'Android Debug Bridge version 1.0.41\\nVersion 34.0.5-cli\\n'
+  exit 0
+fi
+if [ "$1" = -s ] && [ "$3" = shell ]; then
+  printf '%s\\n' 'Starting: Intent { act=android.intent.action.MAIN cmp=com.example/.Outer$InnerActivity }' 'Status: ok' 'Activity: com.example/.Outer$InnerActivity' 'Complete'
+  exit 0
+fi
+exit 1
+`,
+    );
+    await chmod(adb, 0o755);
+
+    const result = await serve(
+      [
+        "start-adb-activity",
+        "emulator-5554",
+        "android.intent.action.MAIN",
+        "--component",
+        "com.example/.Outer$InnerActivity",
+        "--format",
+        "json",
+        "--full-output",
+      ],
+      { REA_ADB_PATH: adb },
+    );
+    expect(result.exitCode).toBe(0);
+    const output = JSON.parse(result.stdout);
+    expect(output.ok).toBe(true);
+    expect(
+      toolContract("start_adb_activity").outputSchema.parse(output.data)
+        .normalized_result,
+    ).toMatchObject({
+      component: "com.example/.Outer$InnerActivity",
+      started_activity:
+        "act=android.intent.action.MAIN cmp=com.example/.Outer$InnerActivity",
+    });
+  },
+);
+
 it.each([
   ["bogus:key:value", "invalid_request"],
   ["string:key:value", "capability_unavailable"],
+  ["string:key:", "capability_unavailable"],
+  ["int:key:", "invalid_request"],
+  ["boolean:key:yes", "invalid_request"],
+  ["int:key:1.5", "invalid_request"],
+  ["long:key:1.5", "invalid_request"],
+  ["float:key:garbage", "invalid_request"],
+  ["float:key:1e-3", "capability_unavailable"],
+  ["float:key:1E-3", "capability_unavailable"],
+  ["float:key:.5", "capability_unavailable"],
+  ["float:key:1.", "capability_unavailable"],
+  ["boolean:key:false", "capability_unavailable"],
+  ["int:key:-3", "capability_unavailable"],
+  ["long:key:9007199254740993", "capability_unavailable"],
+  ["float:key:-1.25", "capability_unavailable"],
 ] as const)(
   "preserves downstream validation for well-delimited activity extra %j",
   async (extra, code) => {

@@ -1,7 +1,5 @@
-import { Client } from "@modelcontextprotocol/client";
-import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { expect } from "vitest";
 import { z } from "zod";
 
@@ -12,7 +10,11 @@ import {
 } from "../../../src/domain/javascript/javascriptFeatureTraceSchemas.js";
 import { javascriptApplicationAnalysisResultSchema } from "../../../src/domain/javascript/javascriptApplicationAnalysis.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
-import { cliTest, type TestCli } from "../../support/cli/cliFixture.js";
+import {
+  cliTest,
+  type SharedMcpCall,
+  type TestCli,
+} from "../../support/cli/cliFixture.js";
 
 type FeatureSeed = z.input<typeof applicationFeatureSeedSchema>;
 type Trace = z.infer<typeof applicationFeatureTraceResultSchema>;
@@ -155,44 +157,49 @@ const analyzeFixture = async (cli: TestCli, root: string) => {
 const traceThroughCli = async (
   cli: TestCli,
   application: unknown,
-  scenario: SeedScenario,
-): Promise<Trace> => {
+  scenario: Pick<SeedScenario, "name" | "seed">,
+) => {
+  const root = await createTestTempDirectory("rea-feature-seed-request-");
+  const input = join(root, "trace.json");
+  await writeFile(
+    input,
+    JSON.stringify({ application, seed: scenario.seed, direction: "both" }),
+  );
   const response = await cli.run({
-    arguments: [
-      "trace-application-feature",
-      JSON.stringify({
-        application,
-        seed: scenario.seed,
-        direction: "both",
-      }),
-      "--json",
-    ],
+    arguments: ["trace-application-feature", input, "--json"],
   });
   expect(response.exitCode, `${scenario.name} via CLI`).toBe(0);
   const evidence = toolContract("trace_application_feature").outputSchema.parse(
     response.json,
   );
-  return applicationFeatureTraceResultSchema.parse(evidence.normalized_result);
+  return {
+    evidence,
+    result: applicationFeatureTraceResultSchema.parse(
+      evidence.normalized_result,
+    ),
+  };
 };
 
 const traceThroughMcp = async (
-  client: Client,
+  call: SharedMcpCall,
   application: unknown,
-  scenario: SeedScenario,
-): Promise<Trace> => {
-  const response = await client.callTool({
-    name: "trace_application_feature",
-    arguments: {
-      application,
-      seed: scenario.seed,
-      direction: "both",
-    },
+  scenario: Pick<SeedScenario, "name" | "seed">,
+) => {
+  const response = await call("trace_application_feature", {
+    application,
+    seed: scenario.seed,
+    direction: "both",
   });
   expect(response.isError, `${scenario.name} via MCP`).not.toBe(true);
   const evidence = toolContract("trace_application_feature").outputSchema.parse(
     response.structuredContent,
   );
-  return applicationFeatureTraceResultSchema.parse(evidence.normalized_result);
+  return {
+    evidence,
+    result: applicationFeatureTraceResultSchema.parse(
+      evidence.normalized_result,
+    ),
+  };
 };
 
 const expectTrace = (trace: Trace, scenario: SeedScenario): void => {
@@ -229,28 +236,61 @@ cliTest(
       `const notificationRoute = { path: "/accounts/preferences/notifications" };\nconst tinyRoute = { path: "/tiny" };\nmodule.exports = { notificationRoute, tinyRoute };\n`,
     );
     const { evidence, result } = await analyzeFixture(cli, root);
-    const client = new Client({ name: "feature-seed-selection", version: "1" });
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [resolve("scripts/rea.mjs"), "mcp"],
-      cwd: process.cwd(),
-      env: { PATH: process.env.PATH ?? "", REA_LOG_LEVEL: "silent" },
-      stderr: "pipe",
-    });
-    transport.stderr?.on("data", () => undefined);
-    try {
-      await client.connect(transport);
-      for (const scenario of createSeedScenarios(result.graph)) {
-        const cliTrace = await traceThroughCli(cli, evidence, scenario);
-        const mcpTrace = await traceThroughMcp(client, evidence, scenario);
-        expectTrace(cliTrace, scenario);
-        expectTrace(mcpTrace, scenario);
-        expect(mcpTrace.seed_matches).toEqual(cliTrace.seed_matches);
-        expect(mcpTrace.coverage).toEqual(cliTrace.coverage);
+    const call = await cli.sharedMcpCall?.();
+    if (call === undefined) throw new Error("Expected file MCP session");
+    for (const scenario of createSeedScenarios(result.graph)) {
+      const { result: cliTrace } = await traceThroughCli(
+        cli,
+        evidence,
+        scenario,
+      );
+      const { result: mcpTrace } = await traceThroughMcp(
+        call,
+        evidence,
+        scenario,
+      );
+      expectTrace(cliTrace, scenario);
+      expectTrace(mcpTrace, scenario);
+      expect(mcpTrace.seed_matches).toEqual(cliTrace.seed_matches);
+      expect(mcpTrace.coverage).toEqual(cliTrace.coverage);
+    }
+  },
+);
+
+cliTest(
+  "normalizes API seed defaults before deriving matching and missing trace identities through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-feature-seed-defaults-");
+    await writeFile(
+      join(root, "preload.js"),
+      `
+      const { contextBridge } = require("electron");
+      contextBridge.exposeInMainWorld("desktop", { openProject: () => true });
+    `,
+    );
+    const { evidence } = await analyzeFixture(cli, root);
+    const call = await cli.sharedMcpCall?.();
+    if (call === undefined) throw new Error("Expected file MCP session");
+    for (const value of ["openProject", "missingProject"]) {
+      const omitted = { name: value, seed: { kind: "api" as const, value } };
+      const explicit = {
+        ...omitted,
+        seed: { ...omitted.seed, match: null, case_sensitive: false },
+      };
+      const omittedCli = await traceThroughCli(cli, evidence, omitted);
+      const explicitCli = await traceThroughCli(cli, evidence, explicit);
+      const omittedMcp = await traceThroughMcp(call, evidence, omitted);
+      const explicitMcp = await traceThroughMcp(call, evidence, explicit);
+      expect(omittedCli, value).toEqual(explicitCli);
+      expect(omittedMcp, value).toEqual(explicitMcp);
+      expect(omittedMcp, value).toEqual(omittedCli);
+      expect(omittedCli.result.seed).toEqual(explicit.seed);
+      if (value === "openProject")
+        expect(omittedCli.result.summary.matched_seeds).toBeGreaterThan(0);
+      else {
+        expect(omittedCli.result.summary.matched_seeds).toBe(0);
+        expect(omittedCli.result.coverage.status).toBe("no-match");
       }
-    } finally {
-      await client.close();
-      await transport.close();
     }
   },
 );

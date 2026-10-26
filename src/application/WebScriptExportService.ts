@@ -4,11 +4,13 @@ import { isAbsolute } from "node:path";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { publishWebScripts } from "../browser/assets/PublishWebScripts.js";
 import { selectScriptCapture } from "../browser/assets/ScriptCaptureAdapters.js";
-import { AnalysisInputError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisCancelledError,
+  AnalysisInputError,
+} from "../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
-import { jsonValueSchema } from "../domain/jsonValue.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   exportWebScriptsInputSchema,
@@ -16,7 +18,7 @@ import {
 } from "../domain/webScriptExport.js";
 import { WebScriptExportError } from "../domain/webScriptExportError.js";
 import type { ExecutionOptions } from "./AnalysisProvider.js";
-import { WEB_SCRIPT_EXPORT_PROVIDER as PROVIDER } from "./InvestigationProviders.js";
+import { WEB_SCRIPT_EXPORT_PROVIDER as PROVIDER } from "../domain/investigationProviders.js";
 import {
   mapWebCaptureExportFailure,
   readSavedWebCapture,
@@ -67,7 +69,10 @@ export const exportWebScriptsValidated = async (
       ]),
     );
   try {
-    options.signal?.throwIfAborted();
+    if (options.signal?.aborted)
+      return err(
+        new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }),
+      );
     const prepared = await readSavedWebCapture(
       input.capture_path,
       SCRIPT_CAPTURE_READER,
@@ -76,12 +81,22 @@ export const exportWebScriptsValidated = async (
     );
     if (!prepared.ok) return prepared;
     const { bytes, loaded } = prepared.value;
-    options.signal?.throwIfAborted();
+    if (options.signal?.aborted)
+      return err(
+        new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }),
+      );
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const result = await publishWebScripts(input, loaded, sha256, {
       resources,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
+    if (options.signal?.aborted === true)
+      return err(
+        new AnalysisCancelledError(OPERATION, {
+          cause: options.signal.reason,
+          partialObservation: { kind: "web-script-export", result },
+        }),
+      );
     return ok(
       createEvidence(
         { path: input.capture_path, sha256, format: "file" },
@@ -93,7 +108,7 @@ export const exportWebScriptsValidated = async (
             capture_path: input.capture_path,
             output_directory: input.output_directory,
           },
-          result: jsonValueSchema.parse(result),
+          result,
           rawResult: null,
           confidence: "derived",
           authority: "historical-reference",
@@ -106,15 +121,10 @@ export const exportWebScriptsValidated = async (
     );
   } catch (cause: unknown) {
     return err(
-      mapWebCaptureExportFailure(
-        cause,
-        SCRIPT_CAPTURE_READER,
-        {
-          capturePath: input.capture_path,
-          outputDirectory: input.output_directory,
-        },
-        options.signal,
-      ),
+      mapWebCaptureExportFailure(cause, SCRIPT_CAPTURE_READER, {
+        capturePath: input.capture_path,
+        outputDirectory: input.output_directory,
+      }),
     );
   }
 };

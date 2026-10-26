@@ -402,16 +402,43 @@ describe("clone_local_application safety", () => {
     },
   );
 
-  it_("rolls back a cancelled copy", async () => {
-    const { root, apps, host, resources } = await cloneSetup();
-    const controller = new AbortController();
-    controller.abort();
+  it_(
+    "reports a cancelled directory or single-file copy as cancelled",
+    async () => {
+      const { root, apps, host, resources } = await cloneSetup();
+      const controller = new AbortController();
+      controller.abort();
+      for (const [application, output] of [
+        [join(apps, "Viewer"), "z"],
+        [join(apps, "Viewer", "viewer"), "z1"],
+      ] as const) {
+        const result = await cloneLocalApplication(
+          { application, output_directory: join(root, output) },
+          { host, resources },
+          { signal: controller.signal },
+        );
+        if (result.ok)
+          throw new Error(`Expected ${application} to be cancelled`);
+        expect(projectAnalysisError(result.error).code).toBe("cancelled");
+      }
+      expect((await readdir(root)).sort()).toEqual(["apps"]);
+    },
+  );
+
+  it_("rejects relative search roots as discovery does", async () => {
+    const { root, host, resources } = await cloneSetup();
     const result = await cloneLocalApplication(
-      { application: join(apps, "Viewer"), output_directory: join(root, "z") },
+      {
+        application: "viewer",
+        output_directory: join(root, "r"),
+        search_roots: ["apps"],
+      },
       { host, resources },
-      { signal: controller.signal },
     );
-    expect(result.ok).toBe(false);
-    expect(await readdir(root)).not.toContain("z");
+    if (result.ok) throw new Error("Expected a relative root to be refused");
+    expect(JSON.stringify(projectAnalysisError(result.error))).toContain(
+      "search_roots must be absolute filesystem paths; received apps.",
+    );
+    expect((await readdir(root)).sort()).toEqual(["apps"]);
   });
 });

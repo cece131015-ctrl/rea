@@ -22,6 +22,7 @@ const emptyManagedMembers = (
   mvid: string,
 ): ManagedMemberInspection => ({
   signature_resolution: null,
+  assembly: null,
   artifact: {
     path: `/examples/${sha256.slice(0, 8)}.dll`,
     sha256,
@@ -49,6 +50,7 @@ const emptyManagedMembers = (
   },
   types: [],
   nesting_read: true,
+  method_rows: { offset: 0, count: 0, total: 0 },
   exported_types: [],
   fields: [],
   methods: [],
@@ -244,6 +246,7 @@ const nativeExportEvidence = () => {
     exports: coverage([
       {
         name: "open_native",
+        runtime_name: "open_native",
         address: "0x1000",
         weak: false,
         reexport: false,

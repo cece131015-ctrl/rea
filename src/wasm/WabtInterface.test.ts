@@ -114,3 +114,36 @@ it("charges shared type signatures at every retained occurrence and preserves bo
     32 * 1024 * 1024,
   );
 });
+
+it("keeps collided labels unknown in each index space and preserves numeric and unique identities", () => {
+  const report = parseWabtWat(`(module
+    (type $duplicate (func (param i32)))
+    (type $duplicate (func (param i64)))
+    (import "env" "first" (func $same (type 0)))
+    (func $same (type 1))
+    (func $unique (type $duplicate))
+    (export "collided" (func $same))
+    (export "numeric" (func 1))
+    (export "ambiguous-type" (func $unique))
+    (export "imported" (func 0)))`).interface;
+  expect(report.entries.find((e) => e.name === "collided")).toMatchObject({
+    index: null,
+    signature: null,
+  });
+  expect(report.entries.find((e) => e.name === "numeric")).toMatchObject({
+    index: 1,
+    signature: { kind: "func", params: ["i64"] },
+    issue: null,
+  });
+  expect(report.entries.find((e) => e.name === "ambiguous-type")).toMatchObject(
+    { index: 2, signature: null },
+  );
+  expect(report.entries.find((e) => e.name === "imported")).toMatchObject({
+    index: 0,
+    signature: { params: ["i32"] },
+  });
+  expect(report.issues).toEqual([
+    expect.stringContaining("type index space"),
+    expect.stringContaining("func index space"),
+  ]);
+});

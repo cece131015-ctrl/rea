@@ -5,7 +5,7 @@ import { join, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { performance } from "node:perf_hooks";
-import { closeVerifierResources } from "../../scripts/lib/verifier-cleanup.mjs";
+import { withVerifierCleanup } from "../../scripts/lib/verifier-cleanup.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -158,7 +158,6 @@ for (const [key, value] of Object.entries(config))
 args.push(prompt);
 const start = performance.now();
 let cleanupOwner;
-let primaryError;
 let commandResult;
 let report;
 let cliVersion = null;
@@ -167,229 +166,237 @@ const controller = new AbortController();
 const cancel = () => controller.abort();
 process.on("SIGINT", cancel);
 process.on("SIGTERM", cancel);
-try {
-  const version = (commandResult = await runOwnedCommand(
-    {
-      command: "codex",
-      arguments: ["--version"],
-      cwd: workspace.path,
-      env: { ...process.env },
-      runId: `rea-facts-cli-version-${randomUUID()}`,
-      expectedCommand: null,
-      sweepTokenOwnedProcesses: true,
-    },
-    { timeoutMs: 10_000, diagnosticBytes: 64 * 1024 },
-    { signal: controller.signal },
-  ));
-  const observedVersion = version.stdout.text.trim();
-  assert.ok(
-    observedVersion.length > 0,
-    "Codex CLI version probe returned no version",
-  );
-  cliVersion = observedVersion;
-  phase = "agent-trial";
-  await writeFile(schemaPath, JSON.stringify(schema));
-  const result = (commandResult = await runOwnedCommand(
-    {
-      command: "codex",
-      arguments: args,
-      cwd: workspace.path,
-      env: { ...process.env },
-      runId: `rea-facts-agent-${randomUUID()}`,
-      expectedCommand: null,
-      sweepTokenOwnedProcesses: true,
-    },
-    {
-      timeoutMs: 600_000,
-      diagnosticBytes: 16 * 1024 * 1024,
-      acceptNonZeroExit: true,
-    },
-    { signal: controller.signal },
-  ));
-  const events = result.stdout.text
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-  const completed = events.filter((event) => event.type === "item.completed");
-  const tools = completed
-    .filter(({ item }) =>
-      [
-        "mcp_tool_call",
-        "command_execution",
-        "file_change",
-        "web_search",
-      ].includes(item?.type),
-    )
-    .map(({ item }) => item);
-  const notices = completed
-    .filter(
-      ({ item }) =>
-        ![
-          "reasoning",
-          "agent_message",
-          "mcp_tool_call",
-          "command_execution",
-          "file_change",
-          "web_search",
-        ].includes(item?.type),
-    )
-    .map(({ item }) => item);
-  let answer = null;
-  try {
-    answer = JSON.parse(await readFile(answerPath, "utf8"));
-  } catch (cause) {
-    if (cause.code !== "ENOENT" && !(cause instanceof SyntaxError)) throw cause;
-  }
-  const metadata = {
-    task: values.task,
-    arm: values.arm,
-    requested_model: config.model,
-    reasoning: config.model_reasoning_effort,
-    harness_sha256: createHash("sha256")
-      .update(await readFile(new URL(import.meta.url)))
-      .digest("hex"),
-    cli_version: cliVersion,
-    enabled_tools: enabled,
-    code_mode_host: true,
-    prompt,
-    prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
-    elapsed_ms: performance.now() - start,
-    exit_code: result.exitCode,
-    usage: events
-      .filter((event) => event.type === "turn.completed")
-      .map((event) => event.usage),
-    tool_calls: tools,
-    other_completed_items: notices,
-    answer,
-    failures: events.filter(
-      (event) => event.type === "error" || event.type === "turn.failed",
-    ),
-    event_types: Object.fromEntries(
-      [...new Set(events.map((event) => event.type))].map((type) => [
-        type,
-        events.filter((event) => event.type === type).length,
-      ]),
-    ),
-    conditions:
-      "Actual Codex CLI, fresh process/MCP, same current backend and caller question. Normal existing auth; --ignore-user-config, no HOME/CODEX_HOME mutation or credential copy. Export/local-shell baseline and candidate share both existing tools; candidate additionally allows inspect_analysis_view. Client code-mode host remains enabled because this installed Codex requires it for all tool dispatch; the experimental code_mode and code_mode_only features remain disabled. Apps/plugins, skills discovery and other agents disabled in both. Workspace-write sandbox. Requested alias is not proof of underlying model identity. Source hashing/model billing unmeasured here; external observer supplies whole process-family costs. Regenerable exports removed with workspace.",
-  };
-  await writeFile(join(values.output, "events.jsonl"), result.stdout.text, {
-    mode: 0o600,
-  });
-  await writeFile(
-    join(values.output, "trial.json"),
-    JSON.stringify(metadata, null, 2) + "\n",
-  );
-  await writeFile(join(values.output, "stderr.log"), result.stderr.text, {
-    mode: 0o600,
-  });
-  report = {
-    task: values.task,
-    arm: values.arm,
-    elapsed_ms: metadata.elapsed_ms,
-    exit_code: result.exitCode,
-    usage: metadata.usage,
-    tool_calls: tools.length,
-    answered: answer !== null,
-    report: join(values.output, "trial.json"),
-  };
-  if (result.exitCode !== 0 || answer === null) process.exitCode = 1;
-} catch (cause) {
-  primaryError = cause;
-  cleanupOwner =
-    cause instanceof OwnedCommandFailure ? cause.cleanupOwner : undefined;
-  const snapshot =
-    cause instanceof OwnedCommandFailure ? cause.snapshot : commandResult;
-  const writes = await Promise.allSettled([
-    writeFile(
-      join(values.output, "failure.json"),
-      JSON.stringify(
+await withVerifierCleanup(async () => {
+  await withVerifierCleanup(async () => {
+    try {
+      const version = (commandResult = await runOwnedCommand(
         {
-          task: values.task,
-          arm: values.arm,
-          classification: "incomplete-pilot",
-          phase,
-          cli_version: cliVersion,
-          requested_model: config.model,
-          reasoning: config.model_reasoning_effort,
-          message: cause.message,
-          reason:
-            cause instanceof OwnedCommandFailure
-              ? cause.reason
-              : "verification",
-          elapsed_ms: performance.now() - start,
-          cleanup_owner_retained: cleanupOwner !== undefined,
-          retained_workspace:
-            cleanupOwner === undefined ? null : workspace.path,
-          cleanup_failure:
-            cause instanceof OwnedCommandFailure ? cause.cleanupFailure : null,
-          cleanup_result:
-            cause instanceof OwnedCommandFailure
-              ? (cause.cleanupResult ?? null)
-              : null,
-          resources:
-            cause instanceof OwnedCommandFailure ? cause.resources : [],
-          collection_failure:
-            cause instanceof OwnedCommandFailure
-              ? cause.collectionFailure
-              : null,
-          diagnostic_truncated: snapshot?.diagnosticTruncated ?? null,
-          output_incomplete: snapshot?.outputIncomplete ?? null,
-          stdout_truncated:
-            snapshot === null || snapshot === undefined
-              ? null
-              : snapshot.stdout.observedBytes > snapshot.stdout.bytes,
-          stderr_truncated:
-            snapshot === null || snapshot === undefined
-              ? null
-              : snapshot.stderr.observedBytes > snapshot.stderr.bytes,
+          command: "codex",
+          arguments: ["--version"],
+          cwd: workspace.path,
+          env: { ...process.env },
+          runId: `rea-facts-cli-version-${randomUUID()}`,
+          expectedCommand: null,
+          sweepTokenOwnedProcesses: true,
         },
-        null,
-        2,
-      ) + "\n",
-    ),
-    ...(snapshot
-      ? [
-          writeFile(
-            join(values.output, "partial-events.jsonl"),
-            snapshot.stdout.text,
-            { mode: 0o600 },
-          ),
-          writeFile(join(values.output, "stderr.log"), snapshot.stderr.text, {
-            mode: 0o600,
-          }),
-        ]
-      : []),
-  ]);
-  const failures = writes
-    .filter((r) => r.status === "rejected")
-    .map((r) => r.reason);
-  if (failures.length) {
-    primaryError = new AggregateError(
-      [cause, ...failures],
-      "Pilot and failure recording failed",
-    );
-  }
-  throw primaryError;
-} finally {
-  try {
-    await closeVerifierResources(
-      [
-        async () => {
-          if (cleanupOwner === undefined) await workspace.close();
-        },
-      ],
-      primaryError,
-    );
-    if (primaryError === undefined && controller.signal.aborted)
-      throw new OwnedCommandFailure(
-        "cancelled",
-        "Agent pilot cancelled during finalization; completed trial data remains recorded.",
-        commandResult ?? null,
+        { timeoutMs: 10_000, diagnosticBytes: 64 * 1024 },
+        { signal: controller.signal },
+      ));
+      const observedVersion = version.stdout.text.trim();
+      assert.ok(
+        observedVersion.length > 0,
+        "Codex CLI version probe returned no version",
       );
-  } finally {
+      cliVersion = observedVersion;
+      phase = "agent-trial";
+      await writeFile(schemaPath, JSON.stringify(schema));
+      const result = (commandResult = await runOwnedCommand(
+        {
+          command: "codex",
+          arguments: args,
+          cwd: workspace.path,
+          env: { ...process.env },
+          runId: `rea-facts-agent-${randomUUID()}`,
+          expectedCommand: null,
+          sweepTokenOwnedProcesses: true,
+        },
+        {
+          timeoutMs: 600_000,
+          diagnosticBytes: 16 * 1024 * 1024,
+          acceptNonZeroExit: true,
+        },
+        { signal: controller.signal },
+      ));
+      const events = result.stdout.text
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+      const completed = events.filter(
+        (event) => event.type === "item.completed",
+      );
+      const tools = completed
+        .filter(({ item }) =>
+          [
+            "mcp_tool_call",
+            "command_execution",
+            "file_change",
+            "web_search",
+          ].includes(item?.type),
+        )
+        .map(({ item }) => item);
+      const notices = completed
+        .filter(
+          ({ item }) =>
+            ![
+              "reasoning",
+              "agent_message",
+              "mcp_tool_call",
+              "command_execution",
+              "file_change",
+              "web_search",
+            ].includes(item?.type),
+        )
+        .map(({ item }) => item);
+      let answer = null;
+      try {
+        answer = JSON.parse(await readFile(answerPath, "utf8"));
+      } catch (cause) {
+        if (cause.code !== "ENOENT" && !(cause instanceof SyntaxError))
+          throw cause;
+      }
+      const metadata = {
+        task: values.task,
+        arm: values.arm,
+        requested_model: config.model,
+        reasoning: config.model_reasoning_effort,
+        harness_sha256: createHash("sha256")
+          .update(await readFile(new URL(import.meta.url)))
+          .digest("hex"),
+        cli_version: cliVersion,
+        enabled_tools: enabled,
+        code_mode_host: true,
+        prompt,
+        prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+        elapsed_ms: performance.now() - start,
+        exit_code: result.exitCode,
+        usage: events
+          .filter((event) => event.type === "turn.completed")
+          .map((event) => event.usage),
+        tool_calls: tools,
+        other_completed_items: notices,
+        answer,
+        failures: events.filter(
+          (event) => event.type === "error" || event.type === "turn.failed",
+        ),
+        event_types: Object.fromEntries(
+          [...new Set(events.map((event) => event.type))].map((type) => [
+            type,
+            events.filter((event) => event.type === type).length,
+          ]),
+        ),
+        conditions:
+          "Actual Codex CLI, fresh process/MCP, same current backend and caller question. Normal existing auth; --ignore-user-config, no HOME/CODEX_HOME mutation or credential copy. Export/local-shell baseline and candidate share both existing tools; candidate additionally allows inspect_analysis_view. Client code-mode host remains enabled because this installed Codex requires it for all tool dispatch; the experimental code_mode and code_mode_only features remain disabled. Apps/plugins, skills discovery and other agents disabled in both. Workspace-write sandbox. Requested alias is not proof of underlying model identity. Source hashing/model billing unmeasured here; external observer supplies whole process-family costs. Regenerable exports removed with workspace.",
+      };
+      await writeFile(join(values.output, "events.jsonl"), result.stdout.text, {
+        mode: 0o600,
+      });
+      await writeFile(
+        join(values.output, "trial.json"),
+        JSON.stringify(metadata, null, 2) + "\n",
+      );
+      await writeFile(join(values.output, "stderr.log"), result.stderr.text, {
+        mode: 0o600,
+      });
+      report = {
+        task: values.task,
+        arm: values.arm,
+        elapsed_ms: metadata.elapsed_ms,
+        exit_code: result.exitCode,
+        usage: metadata.usage,
+        tool_calls: tools.length,
+        answered: answer !== null,
+        report: join(values.output, "trial.json"),
+      };
+      if (result.exitCode !== 0 || answer === null) process.exitCode = 1;
+    } catch (cause) {
+      cleanupOwner =
+        cause instanceof OwnedCommandFailure ? cause.cleanupOwner : undefined;
+      const snapshot =
+        cause instanceof OwnedCommandFailure ? cause.snapshot : commandResult;
+      const writes = await Promise.allSettled([
+        writeFile(
+          join(values.output, "failure.json"),
+          JSON.stringify(
+            {
+              task: values.task,
+              arm: values.arm,
+              classification: "incomplete-pilot",
+              phase,
+              cli_version: cliVersion,
+              requested_model: config.model,
+              reasoning: config.model_reasoning_effort,
+              message: cause?.message,
+              reason:
+                cause instanceof OwnedCommandFailure
+                  ? cause.reason
+                  : "verification",
+              elapsed_ms: performance.now() - start,
+              cleanup_owner_retained: cleanupOwner !== undefined,
+              retained_workspace:
+                cleanupOwner === undefined ? null : workspace.path,
+              cleanup_failure:
+                cause instanceof OwnedCommandFailure
+                  ? cause.cleanupFailure
+                  : null,
+              cleanup_result:
+                cause instanceof OwnedCommandFailure
+                  ? (cause.cleanupResult ?? null)
+                  : null,
+              resources:
+                cause instanceof OwnedCommandFailure ? cause.resources : [],
+              collection_failure:
+                cause instanceof OwnedCommandFailure
+                  ? cause.collectionFailure
+                  : null,
+              diagnostic_truncated: snapshot?.diagnosticTruncated ?? null,
+              output_incomplete: snapshot?.outputIncomplete ?? null,
+              stdout_truncated:
+                snapshot === null || snapshot === undefined
+                  ? null
+                  : snapshot.stdout.observedBytes > snapshot.stdout.bytes,
+              stderr_truncated:
+                snapshot === null || snapshot === undefined
+                  ? null
+                  : snapshot.stderr.observedBytes > snapshot.stderr.bytes,
+            },
+            null,
+            2,
+          ) + "\n",
+        ),
+        ...(snapshot
+          ? [
+              writeFile(
+                join(values.output, "partial-events.jsonl"),
+                snapshot.stdout.text,
+                { mode: 0o600 },
+              ),
+              writeFile(
+                join(values.output, "stderr.log"),
+                snapshot.stderr.text,
+                {
+                  mode: 0o600,
+                },
+              ),
+            ]
+          : []),
+      ]);
+      const failures = writes
+        .filter((r) => r.status === "rejected")
+        .map((r) => r.reason);
+      if (failures.length)
+        throw new AggregateError(
+          [cause, ...failures],
+          "Pilot and failure recording failed",
+        );
+      throw cause;
+    }
+  }, [
+    async () => {
+      if (cleanupOwner === undefined) await workspace.close();
+    },
+  ]);
+  if (controller.signal.aborted)
+    throw new OwnedCommandFailure(
+      "cancelled",
+      "Agent pilot cancelled during finalization; completed trial data remains recorded.",
+      commandResult ?? null,
+    );
+}, [
+  () => {
     process.off("SIGINT", cancel);
+  },
+  () => {
     process.off("SIGTERM", cancel);
-  }
-}
+  },
+]);
 console.log(JSON.stringify(report));

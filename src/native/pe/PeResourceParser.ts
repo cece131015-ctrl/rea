@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { setImmediate } from "node:timers/promises";
 import { assertArtifactReadActive } from "../../artifacts/ArtifactFileOperation.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
-import type { ArtifactReaderBoundary } from "../../artifacts/ArtifactReader.js";
+import type { ArtifactLimitBoundary } from "../../domain/artifactOperationError.js";
 import { jsonParts } from "../../domain/jsonSerialization.js";
 import type {
   InspectPeResourcesInput,
@@ -19,8 +19,10 @@ type Range = { offset: number; bytes: number };
 type OccupiedRange = Range & {
   kind: "directory" | "name" | "data-entry" | "payload";
 };
-const METADATA_BYTES = 8 * 1024 * 1024;
-const limit = (message: string, boundary: ArtifactReaderBoundary): never => {
+/** Complete PE resource result retained before a refusal. */
+export const PE_RESOURCE_METADATA_BYTES = 8 * 1024 * 1024;
+const METADATA_BYTES = PE_RESOURCE_METADATA_BYTES;
+const limit = (message: string, boundary: ArtifactLimitBoundary): never => {
   throw new ArtifactReaderFailure("limit", message, { boundary });
 };
 /** Count bytes through the canonical bounded JSON writer. */
@@ -118,7 +120,6 @@ export const parsePeResources = async (
     ancestors: ReadonlySet<number>,
   ): Promise<void> => {
     if (ancestors.has(at)) peFailure("Cyclic PE resource directory.");
-    if (at % 4 !== 0) peFailure("Unaligned PE resource directory.");
     const header = relative(at, 16);
     const named = bytes.readUInt16LE(header + 12);
     const ids = bytes.readUInt16LE(header + 14);
@@ -131,6 +132,8 @@ export const parsePeResources = async (
     examined += count;
     relative(at, 16 + 8 * count);
     const directory = {
+      path,
+      entry_locations: entryLocations,
       location: recordRange(header, 16 + 8 * count, "directory"),
       characteristics: bytes.readUInt32LE(header),
       timestamp: bytes.readUInt32LE(header + 4),
@@ -175,7 +178,6 @@ export const parsePeResources = async (
             "Unsupported resource leaf outside the type/name/language profile.",
           );
         const data = relative(offset, 16);
-        if (offset % 4 !== 0) peFailure("Unaligned resource data entry.");
         const rva = bytes.readUInt32LE(data);
         const size = bytes.readUInt32LE(data + 4);
         const payloadOffset = layout.map(rva, size);

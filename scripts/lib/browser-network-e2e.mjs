@@ -14,7 +14,7 @@ import {
 } from "../fixtures/browser-network-site.mjs";
 import { assertBrowserNetworkEvidence } from "./browser-network-assertions.mjs";
 import { scenarioProfiles } from "./browser-scenario-verifier.mjs";
-import { closeVerifierResources } from "./verifier-cleanup.mjs";
+import { withVerifierCleanup } from "./verifier-cleanup.mjs";
 
 /** Exercise selected network content through real CLI and stdio MCP, one browser at a time. */
 export async function verifyBrowserNetworkEvidence(
@@ -26,8 +26,7 @@ export async function verifyBrowserNetworkEvidence(
   let profilesBefore;
   let transport;
   let client;
-  let primaryError;
-  try {
+  return withVerifierCleanup(async () => {
     site = await startBrowserNetworkSite();
     profilesBefore = await scenarioProfiles();
     const scenario = browserScenarioSchema.parse({
@@ -178,14 +177,5 @@ export async function verifyBrowserNetworkEvidence(
       profile_cleanup: true,
       connected_network_verified: attachment !== undefined,
     };
-  } catch (cause) {
-    primaryError = cause;
-    throw cause;
-  } finally {
-    const cleanup = [];
-    if (client !== undefined) cleanup.push(() => client.close());
-    if (transport !== undefined) cleanup.push(() => transport.close());
-    if (site !== undefined) cleanup.push(() => site.close());
-    await closeVerifierResources(cleanup, primaryError);
-  }
+  }, [() => client?.close(), () => transport?.close(), () => site?.close()]);
 }

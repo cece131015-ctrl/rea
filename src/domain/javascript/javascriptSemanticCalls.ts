@@ -9,9 +9,12 @@ import type {
   JavaScriptSemanticClosureCapture,
   JavaScriptSemanticFrontier,
 } from "./javascriptSemanticIr.js";
-import { semanticReferenceRole } from "./javascriptSemanticProjection.js";
+import { semanticIdentifierRole } from "./javascriptSemanticProjection.js";
 import { createSemanticCallableStack } from "./javascriptSemanticCallableStack.js";
-import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
+import {
+  semanticStaticPropertyKey,
+  unwrapJavaScriptExpression,
+} from "./javascriptAstValues.js";
 import {
   resolveSemanticBindingState,
   isUnshadowedGlobal,
@@ -23,8 +26,9 @@ import {
   parameterBindings,
   resolveLocalCallables,
 } from "./javascriptSemanticCallResolution.js";
-import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
+import { traverseJavaScriptValueAst } from "./javascriptSemanticTraversal.js";
 import { range } from "./javascriptStaticAnalysisHelpers.js";
+import { semanticCallableResultKind } from "./javascriptSemanticCallableResults.js";
 import { assignedSemanticResultBindings } from "./javascriptSemanticDataEffectHelpers.js";
 
 /** Local call, flow, capture, and unsupported-frontier facts. */
@@ -89,7 +93,7 @@ export const collectJavaScriptSemanticCalls = (
   const callableStack = createSemanticCallableStack((callableId) =>
     callableById.get(callableId),
   );
-  traverseJavaScriptAst(program, {
+  traverseJavaScriptValueAst(program, state.erasedSyntaxNodes, {
     enter: (node, parent) => {
       callableStack.enter(node, parent);
       const owner = enclosingFunction(callableStack.callables);
@@ -210,9 +214,14 @@ const retainedArguments = (
   for (const [index, node] of nodes.entries()) {
     // Babel recovery can leave null slots; retain the other argument positions.
     if (node === null) continue;
+    const valueNode =
+      t.isExpression(node) && !t.isSpreadElement(node)
+        ? unwrapJavaScriptExpression(node).node
+        : null;
     retained.push({
       index,
       location: range(node),
+      valueExpressionLocation: valueNode === null ? null : range(valueNode),
       spread: t.isSpreadElement(node),
     });
   }
@@ -285,6 +294,22 @@ const collectReturnFlows = (
   for (const callableId of site.calleeCallableIds) {
     const callable = callableById.get(callableId);
     if (callable === undefined) continue;
+    const source = state.callableNodesById.get(callableId);
+    const kind =
+      source === undefined ? "value" : semanticCallableResultKind(source);
+    if (kind !== "value") {
+      addFrontier(
+        {
+          kind: "dynamic-call",
+          callableId: site.callerCallableId,
+          location: site.location,
+          reason: `Direct invocation produces ${kind}; body results require separate consumption.`,
+        },
+        state,
+        output,
+      );
+      continue;
+    }
     for (const returnSite of callable.returnSites) {
       output.callReturnFlows.push({
         callSiteId: site.callSiteId,
@@ -310,7 +335,8 @@ const collectCapture = (
     owner.bodyScopeId === null
   )
     return;
-  if (semanticReferenceRole(node, parent) === null) return;
+  if (semanticIdentifierRole(node, parent, () => context.ancestors) === null)
+    return;
   const binding = resolveSemanticBindingState(state, node, node.name);
   if (
     binding === undefined ||
@@ -375,8 +401,8 @@ const collectDynamicScope = (
 ): void => {
   const reason = t.isWithStatement(node)
     ? "`with` introduces a runtime binding environment; names inside are not statically resolvable."
-    : t.isCallExpression(node) && isUnshadowedGlobal(node.callee, state, "eval")
-      ? "`eval` can declare bindings at runtime; names inside the evaluated source are not statically resolvable."
+    : state.opaqueEffects.sites.has(node)
+      ? "`eval` can change bindings and reachable objects at runtime; its effects are not statically resolvable."
       : null;
   if (reason === null) return;
   addFrontier(

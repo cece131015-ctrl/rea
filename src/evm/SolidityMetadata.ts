@@ -90,6 +90,34 @@ const scalar = (value: unknown): SolidityMetadataScalar => {
   );
 };
 
+/** Value identity for duplicate-key checks; map entry order is not significant. */
+const keyIdentity = (value: unknown): string => {
+  if (value instanceof Map)
+    return `{${[...value]
+      .map(([key, item]) => `${keyIdentity(key)}:${keyIdentity(item)}`)
+      .sort()
+      .join(",")}}`;
+  if (Array.isArray(value)) return `[${value.map(keyIdentity).join(",")}]`;
+  return JSON.stringify(scalar(value));
+};
+
+/** Check every map boundary, even when nested values remain uninterpreted. */
+const validateMapKeys = (value: unknown): void => {
+  if (value instanceof Map) {
+    const seen = new Set<string>();
+    for (const [key, item] of value) {
+      const identity = keyIdentity(key);
+      if (seen.has(identity))
+        throw new Error(`CBOR decode error: found repeat map key ${identity}`);
+      seen.add(identity);
+      validateMapKeys(key);
+      validateMapKeys(item);
+    }
+  } else if (Array.isArray(value)) {
+    for (const item of value) validateMapKeys(item);
+  }
+};
+
 /** Parse only a plausible terminal root-map candidate; never establish absence. */
 export const inspectSolidityMetadata = (
   bytes: Uint8Array,
@@ -122,8 +150,13 @@ export const inspectSolidityMetadata = (
     });
     if (!(raw instanceof Map))
       throw new Error("Terminal CBOR candidate did not decode to a root map.");
-    for (const [key, value] of raw as Map<unknown, unknown>)
+    validateMapKeys(raw);
+    // cborg compares Map keys by identity, so repeated byte-string or container
+    // keys (each its own object) pass its duplicate check; compare by value at
+    // every map boundary before projecting any entries.
+    for (const [key, value] of raw as Map<unknown, unknown>) {
       result.entries.push({ key: scalar(key), value: scalar(value) });
+    }
     result.status = result.entries.some(
       ({ key, value }) =>
         key.kind === "uninterpreted" || value.kind === "uninterpreted",

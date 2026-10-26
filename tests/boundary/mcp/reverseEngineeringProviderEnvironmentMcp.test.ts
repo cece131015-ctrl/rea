@@ -72,8 +72,7 @@ it("uses the server-selected environment unless a provider environment overrides
         });
         expect(result.isError).not.toBe(true);
         expect(result.structuredContent).toMatchObject({
-          normalized_result: { stdout: `${scenario.expected}\n` },
-          raw_result: null,
+          raw_result: { stdout: `${scenario.expected}\n` },
         });
       } finally {
         await Promise.all([client.close(), server.close()]);

@@ -161,9 +161,12 @@ describe("optional Ghidra extension boundary", () => {
       resources,
     );
     expect(snapshots[0]?.path).toBe(join(runtime, "extensions/nativeaot.jar"));
-    expect(await readFile(join(runtime, "extensions/nativeaot.jar"))).toEqual(
-      bytes,
-    );
+    expect(
+      Buffer.compare(
+        await readFile(join(runtime, "extensions/nativeaot.jar")),
+        bytes,
+      ),
+    ).toBe(0);
     await expect(
       snapshotGhidraExtensions([extension], runtime, resources),
     ).rejects.toMatchObject({

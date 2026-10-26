@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BrowserContext, Page, Request, Response } from "playwright-core";
 
 import { browserScenarioSchema } from "../domain/browserScenario.js";
-import { BrowserScenarioSecrets } from "./BrowserScenarioSecrets.js";
+import { resolveScenarioSecrets } from "../../tests/fixtures/browserScenarioSecrets.js";
 import { PlaywrightScenarioEvents } from "./PlaywrightScenarioEvents.js";
 
 describe("declared secrets in scenario events", () => {
@@ -26,10 +26,9 @@ describe("declared secrets in scenario events", () => {
       ],
       capture: { events: ["console", "page-errors", "websockets"] },
     });
-    const secrets = BrowserScenarioSecrets.resolve(scenario, {
+    const secrets = resolveScenarioSecrets(scenario, {
       REA_TEST_TOKEN: secret,
     });
-    if (secrets === undefined) throw new Error("Expected resolved secrets");
     const events = new PlaywrightScenarioEvents({
       page,
       enabled: new Set(["console", "page-errors", "websockets"]),
@@ -109,8 +108,7 @@ const captureNetworkBudgetFixture = async (
           }),
     },
   });
-  const secrets = BrowserScenarioSecrets.resolve(scenario, {});
-  if (secrets === undefined) throw new Error("Expected resolved secrets");
+  const secrets = resolveScenarioSecrets(scenario, {});
   const redactBytes = vi.spyOn(secrets, "redactBytes");
   const capture = new PlaywrightScenarioEvents({
     page,
@@ -216,8 +214,7 @@ describe("PlaywrightScenarioEvents", () => {
       ],
       capture: { events: ["page-errors"] },
     });
-    const secrets = BrowserScenarioSecrets.resolve(scenario, {});
-    if (secrets === undefined) throw new Error("Expected resolved secrets");
+    const secrets = resolveScenarioSecrets(scenario, {});
     const events = new PlaywrightScenarioEvents({
       page,
       enabled: new Set(["page-errors"]),
@@ -266,8 +263,7 @@ describe("PlaywrightScenarioEvents", () => {
         events: ["page-errors"],
       },
     });
-    const secrets = BrowserScenarioSecrets.resolve(scenario, {});
-    if (secrets === undefined) throw new Error("Expected resolved secrets");
+    const secrets = resolveScenarioSecrets(scenario, {});
     const events = new PlaywrightScenarioEvents({
       page,
       enabled: new Set(["page-errors"]),
@@ -304,8 +300,7 @@ it("retains ordinary event volumes and reports event-count exhaustion", () => {
     actions: [{ step_id: "wait", action: "wait_for_timeout", duration_ms: 1 }],
     capture: { events: ["page-errors"] },
   });
-  const secrets = BrowserScenarioSecrets.resolve(scenario, {});
-  if (secrets === undefined) throw new Error("Expected resolved secrets");
+  const secrets = resolveScenarioSecrets(scenario, {});
   const events = new PlaywrightScenarioEvents({
     page,
     enabled: new Set(["page-errors"]),
@@ -382,8 +377,7 @@ it("caps live descendant listeners and reuses capacity after closure", () => {
     start_url: { url: "https://example.test" },
     actions: [{ step_id: "wait", action: "wait_for_timeout", duration_ms: 1 }],
   });
-  const secrets = BrowserScenarioSecrets.resolve(scenario, {});
-  if (secrets === undefined) throw new Error("Expected resolved secrets");
+  const secrets = resolveScenarioSecrets(scenario, {});
   const events = new PlaywrightScenarioEvents({
     page,
     enabled: new Set(["websockets"]),

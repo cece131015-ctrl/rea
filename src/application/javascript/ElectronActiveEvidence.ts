@@ -4,7 +4,7 @@ import type { CanonicalElectronActiveObservationInput } from "./ElectronActiveOb
 import type { Evidence, EvidenceObservation } from "../../domain/evidence.js";
 import { createEvidence } from "../../domain/evidence.js";
 import type { ElectronActiveObservationResult } from "../../domain/javascript/electronActiveObservation.js";
-import { jsonObjectSchema, jsonValueSchema } from "../../domain/jsonValue.js";
+import { jsonObjectSchema } from "../../domain/jsonValue.js";
 
 /** Commit the selected Electron experiment and its observed result. */
 export const createElectronActiveEvidence = (
@@ -16,7 +16,7 @@ export const createElectronActiveEvidence = (
     predicateType: "rea.electron-active-scenario",
     operation: "capture_electron_scenario",
     parameters: parameters(input),
-    result: jsonValueSchema.parse(result),
+    result,
     confidence: "observed",
     authority: "controlled-replay",
     environment: {

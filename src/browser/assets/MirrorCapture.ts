@@ -12,6 +12,8 @@ export interface SelectedMirrorCapture {
   readonly resources: readonly CapturedWebResource[];
   /** The final URL of the start navigation, which selects the entry document. */
   readonly entryUrl: string;
+  /** Event sequences of the start navigation step, inclusive. */
+  readonly entrySequences: { readonly first: number; readonly last: number };
   readonly limitations: readonly string[];
   readonly sourceEvidenceId: string | null;
 }
@@ -25,6 +27,10 @@ const select = (
   completeness: capture.completeness,
   resources: scenarioResponses(capture),
   entryUrl: capture.steps[0]?.after_url.url ?? "",
+  entrySequences: {
+    first: capture.steps[0]?.event_sequence_start ?? 0,
+    last: capture.steps[0]?.event_sequence_end ?? -1,
+  },
   limitations: capture.limitations,
   sourceEvidenceId,
 });

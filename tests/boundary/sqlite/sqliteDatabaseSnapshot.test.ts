@@ -67,7 +67,7 @@ it.runIf(SQLITE_NATIVE_LIMITS_AVAILABLE).each(["PERSIST", "TRUNCATE"])(
       table: "records",
     });
     expect(result.rows).toMatchObject({ returned_rows: 4, truncated: false });
-    expect(await readFile(journalPath)).toEqual(before);
+    expect(Buffer.compare(await readFile(journalPath), before)).toBe(0);
     const afterStat = await lstat(journalPath, { bigint: true });
     expect([
       afterStat.ino,
@@ -181,8 +181,8 @@ it("refuses an active journal even before SQLite writes its magic header", async
       reason: "format",
       message: expect.stringContaining("recovery"),
     });
-    expect(await readFile(database.path)).toEqual(original);
-    expect(await readFile(journalPath)).toEqual(journal);
+    expect(Buffer.compare(await readFile(database.path), original)).toBe(0);
+    expect(Buffer.compare(await readFile(journalPath), journal)).toBe(0);
   } finally {
     writer.exec("ROLLBACK");
     writer.close();
@@ -279,7 +279,9 @@ it("rejects a database changed after its copy but before WAL acquisition", async
     reason: "integrity",
   });
   expect(changed).toBe(true);
-  expect(await readFile(`${root}/database.snapshot`)).toEqual(initial);
+  expect(
+    Buffer.compare(await readFile(`${root}/database.snapshot`), initial),
+  ).toBe(0);
 });
 
 it.each(["-wal", "-journal"] as const)(

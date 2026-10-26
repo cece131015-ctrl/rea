@@ -1,22 +1,22 @@
 import { z } from "incur";
 
 import { compareManagedMemberPaths } from "../application/managed/ManagedMemberComparisonService.js";
-import { verifyManagedNativeBoundariesEvidence } from "../application/managed/ManagedNativeVerificationService.js";
+import { executeManagedNativeBoundaries } from "../application/managed/ManagedNativeVerificationService.js";
 import { importManagedReconstructionEvidence } from "../application/managed/ManagedReconstructionService.js";
 import type { DirectAnalysis } from "../composition/directAnalysis.js";
-import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { parseCliJsonInput } from "../cliJsonInput.js";
-import { MANAGED_STATIC_PROVIDER } from "../application/InvestigationProviders.js";
-import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
+import { MANAGED_STATIC_PROVIDER } from "../domain/investigationProviders.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { registerProjectManagedApplicationGraph } from "./managedProjectGraphCommand.js";
 import { managedMembersInputSchema } from "../contracts/managed/managedToolContracts.js";
+import { localPathStringSchema } from "../domain/localPath.js";
+import { withCommandCancellation } from "./commandCancellation.js";
+import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
 
 export const registerManagedCommands = (
   cli: CliInstance,
@@ -64,14 +64,33 @@ const registerInspectManagedMembers = (
       type: managedMembersInputSchema.shape.type_names.describe(
         "Inspect only members declared by this exact type full name, and the string literals they load, such as System.Threading.Monitor; a nested type is named by its bare name, which selects every nested type of that name (repeatable)",
       ),
+      detail: managedMembersInputSchema.shape.detail.describe(
+        "complete returns full Evidence (default); summary returns identity, selection, coverage, limitations and collection counts and requires --evidence-bundle",
+      ),
+      evidenceBundle: localPathStringSchema
+        .optional()
+        .describe(
+          "Write complete parent Evidence to a new local bundle for later inspect-analysis-view calls; never replaces an existing path",
+        ),
     }),
     run: ({ args, options }) =>
-      logCliCommand(logger, "inspect-managed-members", () =>
-        runProviderAnalysis(
-          args.path,
-          "inspect_managed_members",
-          options.type === undefined ? {} : { type_names: options.type },
-          logger,
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "inspect-managed-members", () =>
+          runProviderAnalysis(
+            args.path,
+            "inspect_managed_members",
+            options.type === undefined ? {} : { type_names: options.type },
+            logger,
+            signal,
+            {
+              ...(options.detail === undefined
+                ? {}
+                : { detail: options.detail }),
+              ...(options.evidenceBundle === undefined
+                ? {}
+                : { evidenceBundlePath: options.evidenceBundle }),
+            },
+          ),
         ),
       ),
   });
@@ -114,52 +133,30 @@ const registerCompareManagedMembers = (
       "Compare managed PE/CLI member inventories by exact declared type, name, and signature; names alone never form a match",
     args: compareManagedMemberArgs,
     run: ({ args }) =>
-      logCliCommand(logger, "compare-managed-members", async () => {
-        const resources = new ArtifactResourceScope();
-        const result = await compareManagedMemberPaths(
-          {
-            leftPath: args.leftPath,
-            rightPath: args.rightPath,
-          },
-          {},
-          resources,
-        );
-        try {
-          await resources.close();
-        } catch (cause: unknown) {
-          const cleanup = ArtifactReaderFailure.cleanupObservation(
-            cause,
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "compare-managed-members", async () => {
+          const resources = new ArtifactResourceScope();
+          const result = await finishAnalysisCommand(
+            () =>
+              compareManagedMemberPaths(
+                {
+                  leftPath: args.leftPath,
+                  rightPath: args.rightPath,
+                },
+                {},
+                resources,
+              ),
+            resources,
+            MANAGED_STATIC_PROVIDER.id,
+            "compare_managed_members",
+            signal,
             "Managed member comparison resources",
           );
-          const failure = new ProviderCleanupError(
-            MANAGED_STATIC_PROVIDER.id,
-            cleanup.resources,
-            { reason: cleanup.reason },
-            {
-              cause,
-              operation: "compare_managed_members",
-              ...(result.ok ? { partialObservation: result.value } : {}),
-            },
-          );
-          const error = result.ok
-            ? failure
-            : analysisErrorWithCleanupFailure(
-                result.error,
-                failure,
-                "compare_managed_members",
-              );
-          return {
-            error: "Managed member comparison failed",
-            ...projectAnalysisError(error),
-          };
-        }
-        return result.ok
-          ? result.value
-          : {
-              error: "Managed member comparison failed",
-              ...projectAnalysisError(result.error),
-            };
-      }),
+          return "evidence_id" in result
+            ? result
+            : { error: "Managed member comparison failed", ...result };
+        }),
+      ),
   });
 };
 
@@ -207,8 +204,10 @@ const registerVerifyManagedNativeBoundaries = (
           "verify-managed-native-boundaries",
         );
         if (!input.ok) return input.error;
-        const result = verifyManagedNativeBoundariesEvidence(input.value);
-        return result.ok ? result.value : projectAnalysisError(result.error);
+        const result = executeManagedNativeBoundaries(input.value);
+        return result.ok
+          ? result.value.evidence
+          : projectAnalysisError(result.error);
       }),
   });
 };

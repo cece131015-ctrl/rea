@@ -248,7 +248,7 @@ export const captureSqliteDatabaseSnapshot = async (
   signal?: AbortSignal,
   selectedFileSystem: StableArtifactFileSystem = fileSystem,
 ) => {
-  signal?.throwIfAborted();
+  assertArtifactReadActive(signal);
   const walPath = `${path}-wal`;
   const journalPath = `${path}-journal`;
   const paths = [path, walPath, journalPath] as const;
@@ -280,8 +280,7 @@ export const captureSqliteDatabaseSnapshot = async (
         observed_sqlite_snapshot_input_bytes: selectedSize.toString(),
       },
       {
-        remediationAction:
-          "Use the application's supported export workflow to create a consistent, smaller offline SQLite snapshot containing only the relevant data, then inspect that snapshot. REA will not truncate or modify the selected source.",
+        remediationAction: `Use the application's supported export workflow to create a consistent, smaller offline SQLite snapshot containing only the relevant data, then inspect that snapshot. REA will not truncate or modify the selected source. The combined input allowance is ${String(SQLITE_DATABASE_LIMITS.inputBytes)} bytes. This release has no runtime override. worker_timeout_ms does not raise it.`,
       },
     );
   if (journal !== null)
@@ -355,6 +354,6 @@ export const captureSqliteDatabaseSnapshot = async (
         "integrity",
         `SQLite snapshot file set changed during acquisition: ${paths[index] ?? path}`,
       );
-  signal?.throwIfAborted();
+  assertArtifactReadActive(signal);
   return { snapshotPath, artifact, wal: walArtifact };
 };

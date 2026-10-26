@@ -3,6 +3,7 @@ import {
   type AnalysisInputIssue,
 } from "../analysisErrorCore.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
+import { uniqueSorted } from "../canonicalOrdering.js";
 import { jsonObjectSchema, type JsonValue } from "../jsonValue.js";
 import type { JavaScriptApplicationAnalysisResult } from "../javascript/javascriptApplicationAnalysis.js";
 import type { ApplicationNode } from "../javascript/javascriptApplicationGraphSchemas.js";
@@ -10,6 +11,7 @@ import { err, ok, type Result } from "../result.js";
 import type { JavaScriptModuleReference } from "./javascriptModuleReferences.js";
 import {
   javascriptApplicationSourceCoverage,
+  javascriptStaticSourceCoverageSummary,
   type JavaScriptApplicationSourceCoverage,
 } from "./javascriptApplicationCoverage.js";
 import { projectJavaScriptFacts } from "./javascriptFactsView.js";
@@ -22,6 +24,7 @@ import type {
   AnalysisViewParent,
   AnalysisViewRequest,
   UnsignedAnalysisView,
+  GroupingViewKind,
 } from "./analysisView.js";
 
 const OPERATION = "inspect_analysis_view";
@@ -39,21 +42,27 @@ const jsIncompatible = (detail: string): AnalysisError =>
     },
   ]);
 
-/** Exact module path or original source-map reference, when available. */
-export const javascriptModulePath = (node: ApplicationNode): string | null => {
-  if (node.identity.strategy === "canonical-path") return node.identity.path;
+/** Every exact module path or original source-map reference retained by a node. */
+export const javascriptModulePaths = (
+  node: ApplicationNode,
+): readonly string[] => {
+  if (node.identity.strategy === "canonical-path") return [node.identity.path];
   if (node.identity.strategy === "source-map-original")
-    return node.identity.original_source;
+    return [node.identity.original_source];
+  const paths = new Set<string>();
   for (const observation of node.observations) {
     const path = observation.properties.path;
-    if (typeof path === "string") return path;
+    if (typeof path === "string") {
+      paths.add(path);
+      continue;
+    }
     const location = observation.evidence.location;
     if (location.available && location.value.kind === "artifact-path")
-      return location.value.path;
+      paths.add(location.value.path);
     if (location.available && location.value.kind === "source-range")
-      return location.value.source;
+      paths.add(location.value.source);
   }
-  return null;
+  return [...paths];
 };
 
 interface ModuleEntry {
@@ -61,6 +70,7 @@ interface ModuleEntry {
     readonly kind: JavaScriptModuleReference["kind"];
   };
   readonly path: string | null;
+  readonly paths: readonly string[];
 }
 
 const isModuleNode = (node: ApplicationNode): node is ModuleEntry["node"] =>
@@ -73,7 +83,10 @@ function* moduleEntries(
   nodes: readonly ApplicationNode[],
 ): Generator<ModuleEntry> {
   for (const node of nodes) {
-    if (isModuleNode(node)) yield { node, path: javascriptModulePath(node) };
+    if (isModuleNode(node)) {
+      const paths = javascriptModulePaths(node);
+      yield { node, path: paths[0] ?? null, paths };
+    }
   }
 }
 
@@ -94,10 +107,20 @@ const modulePage = (
   for (const entry of moduleEntries(nodes)) {
     if (view.where?.kind !== undefined && entry.node.kind !== view.where.kind)
       continue;
-    if (view.where?.path !== undefined && entry.path !== view.where.path)
+    const selectedPath = view.where?.path;
+    if (
+      selectedPath !== undefined &&
+      (selectedPath === null
+        ? entry.path !== null
+        : !entry.paths.includes(selectedPath))
+    )
       continue;
+    const selectedEntry =
+      selectedPath !== undefined && selectedPath !== null
+        ? { ...entry, path: selectedPath }
+        : entry;
     if (total >= view.offset && entries.length < view.limit)
-      entries.push(entry);
+      entries.push(selectedEntry);
     total += 1;
   }
   return { entries, total };
@@ -147,10 +170,10 @@ const sourceRanges = (node: ApplicationNode): readonly JsonValue[] =>
       : [];
   });
 
-const moduleItem = (node: ApplicationNode): JsonValue => ({
+const moduleItem = (node: ApplicationNode, path: string | null): JsonValue => ({
   node_id: node.node_id,
   kind: node.kind,
-  path: javascriptModulePath(node),
+  path,
   identity: node.identity,
   hashes: [...nodeHashes(node)],
   exports: [...exportNames(node)],
@@ -227,39 +250,46 @@ const parentFields = (
     ...analysis.graph.limitations,
     ...analysis.semantic_graph.limitations,
   ];
+  const mergedLimitations = uniqueSorted([
+    ...parent.limitations,
+    ...limitations,
+  ]);
   return {
-    parent_evidence_id: parent.evidenceId,
-    parent_operation: "analyze_javascript_application" as const,
-    parent_digest: parent.evidenceId.slice(3),
-    artifact: {
-      path: analysis.input_path,
-      sha256: analysis.root_artifact_sha256,
+    limitationCount: mergedLimitations.length,
+    fields: {
+      parent_evidence_id: parent.evidenceId,
+      parent_operation: "analyze_javascript_application" as const,
+      parent_digest: parent.evidenceId.slice(3),
+      artifact: {
+        path: analysis.input_path,
+        sha256: analysis.root_artifact_sha256,
+      },
+      limitations: boundedViewMessages(
+        mergedLimitations,
+        parent.evidenceId,
+        "limitations",
+      ),
+      unknowns: boundedViewMessages(
+        limitations,
+        parent.evidenceId,
+        "unknowns",
+        javascriptCoverageUnknowns(sourceCoverage),
+      ),
     },
-    limitations: boundedViewMessages(
-      [...parent.limitations, ...limitations],
-      parent.evidenceId,
-      "limitations",
-    ),
-    unknowns: boundedViewMessages(
-      limitations,
-      parent.evidenceId,
-      "unknowns",
-      javascriptCoverageUnknowns(sourceCoverage),
-    ),
   };
 };
 
 const selectModule = (
   modules: readonly ModuleEntry[],
   selector: Extract<AnalysisViewRequest, { readonly kind: "item" }>["selector"],
-): Result<ApplicationNode, AnalysisError> => {
+): Result<ModuleEntry, AnalysisError> => {
   if ("node_id" in selector) {
     const matches = modules.filter(
       ({ node }) => node.node_id === selector.node_id,
     );
     if (matches.length === 1) {
       const selected = matches[0];
-      if (selected !== undefined) return ok(selected.node);
+      if (selected !== undefined) return ok(selected);
     }
     return err(
       inputError([
@@ -272,10 +302,15 @@ const selectModule = (
     );
   }
   if ("path" in selector) {
-    const matches = modules.filter((entry) => entry.path === selector.path);
+    const matches = modules.filter((entry) =>
+      selector.path === null
+        ? entry.path === null
+        : entry.paths.includes(selector.path),
+    );
     if (matches.length === 1) {
       const selected = matches[0];
-      if (selected !== undefined) return ok(selected.node);
+      if (selected !== undefined)
+        return ok({ ...selected, path: selector.path });
     }
     if (matches.length === 0)
       return err(
@@ -307,7 +342,7 @@ const selectModule = (
 export const projectJavaScriptApplicationView = (
   parent: AnalysisViewParent,
   analysis: JavaScriptApplicationAnalysisResult,
-  view: Exclude<AnalysisViewRequest, { kind: "api-surface" }>,
+  view: Exclude<AnalysisViewRequest, { kind: GroupingViewKind }>,
 ): Result<UnsignedAnalysisView, AnalysisError> => {
   if (
     view.kind !== "summary" &&
@@ -322,7 +357,11 @@ export const projectJavaScriptApplicationView = (
       ),
     );
   const sourceCoverage = javascriptApplicationSourceCoverage(analysis);
-  const shared = parentFields(parent, analysis, sourceCoverage);
+  const { fields: shared, limitationCount } = parentFields(
+    parent,
+    analysis,
+    sourceCoverage,
+  );
   if (view.kind === "javascript-facts") {
     const { rows, total } = projectJavaScriptFacts(analysis.graph.nodes, view);
     return ok({
@@ -347,6 +386,8 @@ export const projectJavaScriptApplicationView = (
     });
   }
   if (view.kind === "summary") {
+    // Summary coverage counts modules. Graph nodes that are not modules stay
+    // in summary.coverage.application rather than inflating this total.
     const moduleCount = analysis.graph.nodes.reduce(
       (count, node) => count + Number(isModuleNode(node)),
       0,
@@ -366,6 +407,7 @@ export const projectJavaScriptApplicationView = (
         statistics: jsonObjectSchema.parse(analysis.statistics),
         electron: jsonObjectSchema.parse(analysis.summary),
         coverage: jsonObjectSchema.parse({
+          static_sources: javascriptStaticSourceCoverageSummary(analysis),
           application: analysis.graph.coverage,
           semantic: {
             ...analysis.semantic_graph.coverage,
@@ -379,9 +421,9 @@ export const projectJavaScriptApplicationView = (
           application_unknowns: sourceCoverage.application_unknown_count,
           semantic_unknowns: sourceCoverage.semantic_unknown_count,
         }),
-        limitation_count: analysis.limitations.length,
+        limitation_count: limitationCount,
       },
-      coverage: completeCoverage(moduleCount, analysis.graph.nodes.length),
+      coverage: completeCoverage(moduleCount, moduleCount),
       ...shared,
     });
   }
@@ -398,7 +440,7 @@ export const projectJavaScriptApplicationView = (
     return ok({
       kind: "item",
       view,
-      item: moduleItem(selected.value),
+      item: moduleItem(selected.value.node, selected.value.path),
       coverage: completeCoverage(1, modules.length),
       ...shared,
     });

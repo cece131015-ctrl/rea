@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { watch } from "node:fs";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { expect, onTestFinished, test, vi } from "vitest";
 
 import { PcapProvider } from "../../../src/pcap/PcapProvider.js";
+import {
+  CAPINFOS_COMMAND_ENV,
+  TSHARK_COMMAND_ENV,
+} from "../../../src/pcap/PcapConfiguration.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import {
   pcapResultSchemas,
@@ -16,93 +20,18 @@ import { PrivateRuntimeRoot } from "../../../src/process/PrivateRuntimeRoot.js";
 import { cleanupOwnedProcessGroup } from "../../../src/process/ProcessOwnership.js";
 import { spawnOwnedProviderProcess } from "../../../src/process/ProviderProcess.js";
 import type { PcapCommandLauncher } from "../../../src/pcap/PcapCommand.js";
+import {
+  CAPINFOS_OUTPUT,
+  TSHARK_JSON,
+  writeStubTools,
+  type PcapStubToolsOptions,
+} from "../../fixtures/pcap/pcapTestTools.js";
 
 const it = test.skipIf(process.platform !== "linux");
-
-const CAPINFOS_OUTPUT = [
-  "File name:           /work/capture.pcap",
-  "File type:           Wireshark/tcpdump/... - pcap",
-  "File encapsulation:  Ethernet",
-  "Packet size limit:   file hdr: 262144 bytes",
-  "Number of packets:   3",
-  "Capture duration:    0.123 seconds",
-].join("\n");
-
-const TSHARK_JSON = JSON.stringify([
-  {
-    _source: {
-      layers: {
-        "frame.number": ["1"],
-        "frame.protocols": ["eth:ethertype:ip:udp:dns"],
-        "ip.src": ["192.168.1.100"],
-        "ip.dst": ["8.8.8.8"],
-        "dns.qry.name": ["api.example.com"],
-        "dns.flags.response": ["1"],
-        "dns.a": ["93.184.216.34"],
-      },
-    },
-  },
-  {
-    _source: {
-      layers: {
-        "frame.number": ["2"],
-        "frame.protocols": ["eth:ethertype:ip:tcp:tls"],
-        "ip.src": ["192.168.1.100"],
-        "ip.dst": ["93.184.216.34"],
-        "tls.handshake.extensions_server_name": ["api.example.com"],
-      },
-    },
-  },
-  {
-    _source: {
-      layers: {
-        "frame.number": ["3"],
-        "frame.protocols": ["eth:ethertype:ip:tcp:http"],
-        "ip.src": ["192.168.1.100"],
-        "ip.dst": ["93.184.216.34"],
-        "http.request.full_uri": ["http://api.example.com/v1/data"],
-      },
-    },
-  },
-]);
-
-const writeStubTools = async (
-  root: string,
-  options: { readonly failCapinfos?: boolean } = {},
-): Promise<{ tshark: string; capinfos: string }> => {
-  const tshark = join(root, "tshark");
-  const capinfos = join(root, "capinfos");
-  await writeFile(
-    tshark,
-    `#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'TShark (Wireshark) 4.6.6-stub\\n'; exit 0; fi
-[ "$1" = "-n" ] && [ "$2" = "-r" ] && [ "$4" = "-T" ] && [ "$5" = "json" ] || exit 2
-printf '%s' '${TSHARK_JSON.replace(/'/gu, "'\\''")}'
-exit 0
-`,
-    { mode: 0o755 },
-  );
-  await writeFile(
-    capinfos,
-    `#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'Capinfos (Wireshark) 4.6.6-stub\\n'; exit 0; fi
-[ "$1" = "-M" ] && [ "$2" = "--" ] && [ "$#" = "3" ] || exit 2
-if [ "${String(options.failCapinfos === true)}" = "true" ]; then
-  printf 'capinfos: The file is not a capture file' >&2; exit 1
-fi
-printf '%s\\n' '${CAPINFOS_OUTPUT.replace(/'/gu, "'\\''")}'
-exit 0
-`,
-    { mode: 0o755 },
-  );
-  await chmod(tshark, 0o755);
-  await chmod(capinfos, 0o755);
-  return { tshark, capinfos };
-};
+const posixIt = test.skipIf(process.platform === "win32");
 
 const providerWith = async (
-  options: {
-    failCapinfos?: boolean;
+  options: PcapStubToolsOptions & {
     launcher?: PcapCommandLauncher;
     beforeClose?: () => void;
   } = {},
@@ -139,7 +68,7 @@ const captureFixture = async (root: string): Promise<string> => {
 };
 
 it("inspects both tools without reading a capture", async () => {
-  const { provider } = await providerWith();
+  const { provider, root } = await providerWith();
   const result = await evidenceResult(provider, {
     operation: "inspect_pcap_client",
     input: {},
@@ -147,9 +76,48 @@ it("inspects both tools without reading a capture", async () => {
   expect(result.client).toMatchObject({
     tshark_source: "environment",
     tshark_version: "TShark (Wireshark) 4.6.6-stub",
+    tshark_sha256: createHash("sha256")
+      .update(await readFile(join(root, "tshark")))
+      .digest("hex"),
+    tshark_identity_status: "verified",
     capinfos_source: "environment",
     capinfos_version: "Capinfos (Wireshark) 4.6.6-stub",
+    capinfos_sha256: createHash("sha256")
+      .update(await readFile(join(root, "capinfos")))
+      .digest("hex"),
+    capinfos_identity_status: "verified",
   });
+});
+
+it("rejects a selected TShark whose bytes change during its version probe", async () => {
+  const root = await createTestTempDirectory("rea-pcap-tool-identity-");
+  const { tshark, capinfos } = await writeStubTools(root);
+  await writeFile(
+    tshark,
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'TShark (Wireshark) 4.6.6-stub\\n'
+  printf '\\n# changed during version probe\\n' >> "$0"
+  exit 0
+fi
+exit 2
+`,
+    { mode: 0o755 },
+  );
+  const provider = new PcapProvider({
+    environment: { REA_TSHARK_COMMAND: tshark, REA_CAPINFOS_COMMAND: capinfos },
+  });
+  onTestFinished(() => provider.close());
+  const result = await provider.execute({
+    operation: "inspect_pcap_client",
+    input: {},
+  });
+  expect(result.ok).toBe(false);
+  if (!result.ok)
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "artifact_changed",
+      details: { path: tshark },
+    });
 });
 
 it("inspects a capture with endpoints, DNS, TLS SNI, and HTTP", async () => {
@@ -165,7 +133,10 @@ it("inspects a capture with endpoints, DNS, TLS SNI, and HTTP", async () => {
     sha256: createHash("sha256").update("pcap-fixture-bytes").digest("hex"),
   });
   expect(result.file_type).toBe("Wireshark/tcpdump/... - pcap");
+  expect(result.capture_start).toBe("2026-10-11T14:13:40.608505Z");
+  expect(result.capture_end).toBe("2026-10-11T14:13:40.981978Z");
   expect(result.packet_count).toBe(3);
+  expect(result.snapshot_length).toBe(262144);
   expect(result.endpoints).toEqual(
     expect.arrayContaining([
       { address: "192.168.1.100", port: null, packet_count: 3 },
@@ -183,6 +154,93 @@ it("inspects a capture with endpoints, DNS, TLS SNI, and HTTP", async () => {
   expect(result.http_request_uris).toEqual(["http://api.example.com/v1/data"]);
   expect(result.coverage).toBe("complete");
 });
+
+it("retains an absolute HTTP request target without a Host-derived full URI", async () => {
+  const { provider, root } = await providerWith({ httpAbsoluteUriOnly: true });
+  const path = await captureFixture(root);
+  const result = await evidenceResult(provider, {
+    operation: "inspect_pcap_capture",
+    input: { path },
+  });
+  expect(result.http_request_uris).toEqual(["http://proxy.example.test/path"]);
+  expect(result.coverage).toBe("complete");
+});
+
+it.each(["stdout", "stderr"] as const)(
+  "refuses replacement-decoded TShark %s and names its invalid stream",
+  async (stream) => {
+    const { provider, root } = await providerWith({
+      invalidTsharkStream: stream,
+    });
+    const path = await captureFixture(root);
+    const result = await provider.execute({
+      operation: "inspect_pcap_capture",
+      input: { path },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected malformed producer encoding");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "unreadable_output",
+      details: {
+        diagnostics: { stage: "tshark", invalid_utf8_streams: [stream] },
+      },
+    });
+  },
+);
+
+it("keeps a literal replacement character in valid TShark UTF-8", async () => {
+  const { provider, root } = await providerWith({ literalReplacement: true });
+  const path = await captureFixture(root);
+  const result = await evidenceResult(provider, {
+    operation: "inspect_pcap_capture",
+    input: { path },
+  });
+  expect(result.http_request_uris).toEqual(["http://api.example.com/�"]);
+  expect(result.coverage).toBe("complete");
+});
+
+posixIt.each(["stdout", "stderr"] as const)(
+  "refuses replacement-decoded TShark version %s before banner parsing",
+  async (stream) => {
+    const { provider } = await providerWith({
+      invalidTsharkVersionStream: stream,
+    });
+    const result = await provider.execute({
+      operation: "inspect_pcap_client",
+      input: {},
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected malformed version output");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "unreadable_output",
+      details: {
+        diagnostics: { stage: "version", invalid_utf8_streams: [stream] },
+      },
+    });
+  },
+);
+
+it.each(["stdout", "stderr"] as const)(
+  "refuses replacement-decoded capinfos %s before metadata parsing",
+  async (stream) => {
+    const { provider, root } = await providerWith({
+      invalidCapinfosStream: stream,
+    });
+    const path = await captureFixture(root);
+    const result = await provider.execute({
+      operation: "inspect_pcap_capture",
+      input: { path },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected malformed producer encoding");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "unreadable_output",
+      details: {
+        diagnostics: { stage: "capinfos", invalid_utf8_streams: [stream] },
+      },
+    });
+  },
+);
 
 it.each([
   { stage: "capinfos", denySnapshotClose: false },
@@ -252,7 +310,9 @@ it.each([
             },
     });
     expect(producerLaunches).toBe(1);
-    expect(await readFile(path)).toEqual(Buffer.from("pcap-fixture-bytes"));
+    expect(
+      Buffer.compare(await readFile(path), Buffer.from("pcap-fixture-bytes")),
+    ).toBe(0);
     const snapshotPath = result.error.cleanupResources.find((resource) =>
       resource.endsWith("/capture.pcap"),
     );
@@ -282,9 +342,12 @@ it.each([
         });
         expect(result.error.cleanupIncomplete).toBe(true);
         expect(cleanupAttempts).toBe(attemptsBeforeClose + 1);
-        await expect(readFile(snapshotPath)).resolves.toEqual(
-          Buffer.from("pcap-fixture-bytes"),
-        );
+        expect(
+          Buffer.compare(
+            await readFile(snapshotPath),
+            Buffer.from("pcap-fixture-bytes"),
+          ),
+        ).toBe(0);
       } finally {
         denied.mockRestore();
       }
@@ -376,10 +439,16 @@ it("reports relative configuration and missing capinfos as capability gaps", asy
     });
     if (result.ok) throw new Error("expected unavailable tools");
     const projected = projectAnalysisError(result.error);
-    expect(projected.code).toBe("capability_unavailable");
-    expect(projected.message).toContain(
-      "Supply Wireshark 4.x tshark and capinfos",
-    );
+    expect(projected).toMatchObject({
+      code: "capability_unavailable",
+      details: { provider_id: "pcap", operation: "inspect_pcap_client" },
+    });
+    expect(projected.message).toContain(TSHARK_COMMAND_ENV);
+    expect(projected.message).toContain(CAPINFOS_COMMAND_ENV);
+    expect(projected.message).toContain("Wireshark 4.x");
+    expect(projected.message).toContain("PATH");
+    expect(projected.message).toContain("absolute");
+    expect(projected.message).toContain("does not install");
   }
 });
 
@@ -400,10 +469,12 @@ it("names the prlimit selection when the Linux limiter is unusable", async () =>
   });
   if (result.ok) throw new Error("expected an unusable limiter");
   const projected = projectAnalysisError(result.error);
-  expect(projected.code).toBe("capability_unavailable");
-  expect(projected.message).toContain(
-    "(REA_TSHARK_PRLIMIT_COMMAND must be absolute.) Check that REA_TSHARK_PRLIMIT_COMMAND",
-  );
+  expect(projected).toMatchObject({
+    code: "capability_unavailable",
+    details: { provider_id: "pcap", operation: "inspect_pcap_capture" },
+  });
+  expect(projected.message).toContain("must be absolute");
+  expect(projected.message).toContain("Check that REA_TSHARK_PRLIMIT_COMMAND");
 });
 
 const nodeTool = async (
@@ -448,7 +519,7 @@ console.log(${JSON.stringify(TSHARK_JSON)});`,
     expect(projectAnalysisError(result.error)).toMatchObject({
       code: "artifact_changed",
     });
-  expect(await readFile(path)).toEqual(before);
+  expect(Buffer.compare(await readFile(path), before)).toBe(0);
 });
 
 it("binds both tools to the snapshot when the original capture changes", async () => {
@@ -661,3 +732,15 @@ it.each([false, true])(
     ).rejects.toMatchObject({ code: "ENOENT" });
   },
 );
+
+it("requests HTTP/2 URI facts and projects them through capture inspection", async () => {
+  const { provider, root } = await providerWith({ http2Uri: true });
+  const path = await captureFixture(root);
+  const result = await evidenceResult(provider, {
+    operation: "inspect_pcap_capture",
+    input: { path },
+  });
+  expect(result.http_request_uris).toEqual(["http://example.test/h2"]);
+  expect(result.http_request_uri_count).toBe(1);
+  expect(result.coverage).toBe("complete");
+});

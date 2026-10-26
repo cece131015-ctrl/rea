@@ -49,6 +49,19 @@ describe("cssUrlReferences", () => {
     ]);
   });
 
+  it("treats direct string arguments of image-set functions as URLs", () => {
+    expect(
+      urls(
+        `.a{b:image-set("a.png" 1x,'b.png' 2x)} .c{d:-webkit-image-set(url(c.png) 1x, "d.avif" type("image/avif"))} .e{f:g("no.png")}`,
+      ),
+    ).toEqual([
+      { kind: "string", url: "a.png", source: '"a.png"' },
+      { kind: "string", url: "b.png", source: "'b.png'" },
+      { kind: "url-token", url: "c.png", source: "url(c.png)" },
+      { kind: "string", url: "d.avif", source: '"d.avif"' },
+    ]);
+  });
+
   it("writes CSS strings that round-trip through the tokenizer", () => {
     const written = cssString('a"b\\c\nd');
     expect(cssUrlReferences(`@import ${written};`)[0]?.url).toBe('a"b\\c\nd');

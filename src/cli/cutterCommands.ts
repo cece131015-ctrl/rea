@@ -6,13 +6,6 @@ import { CutterBridgeService } from "../cutter/CutterBridgeService.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
-import { err, type Result } from "../domain/result.js";
-import type { CutterBridgeDiscovery } from "../cutter/CutterBridgeClient.js";
-import { AnalysisError } from "../domain/analysisErrorBase.js";
-import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
-import { ProviderAdapterError } from "../domain/providerAdapterError.js";
-import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
-import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import type { CliInstance } from "./types.js";
 import { cliIntegerArgument } from "./options.js";
@@ -34,44 +27,13 @@ export const registerCutterCommands = (
       withCommandCancellation((signal) =>
         logCliCommand(logger, CLI_COMMANDS.listCutterSessions, async () => {
           const cutter = createCutter();
-          let result: Result<CutterBridgeDiscovery, AnalysisError>;
-          try {
-            result = await cutter.listSessions({ signal });
-          } catch (cause: unknown) {
-            result = err(
-              cause instanceof AnalysisError
-                ? cause
-                : new ProviderAdapterError("cutter", "list_cutter_sessions", {
-                    cause,
-                  }),
-            );
-          }
-          try {
-            await cutter.close();
-          } catch (cause: unknown) {
-            const cleanup =
-              cause instanceof AnalysisError
-                ? cause
-                : new ProviderAdapterError("cutter", "list_cutter_sessions", {
-                    cause,
-                  });
-            result = err(
-              result.ok
-                ? cleanup
-                : analysisErrorWithCleanupFailure(
-                    result.error,
-                    cleanup,
-                    "list_cutter_sessions",
-                  ),
-            );
-          }
-          if (result.ok && signal.aborted)
-            result = err(
-              new AnalysisCancelledError("list_cutter_sessions", {
-                cause: signal.reason,
-              }),
-            );
-          return result.ok ? result.value : projectAnalysisError(result.error);
+          return finishAnalysisCommand(
+            () => cutter.listSessions({ signal }),
+            cutter,
+            "cutter",
+            "list_cutter_sessions",
+            signal,
+          );
         }),
       ),
   });
@@ -123,7 +85,6 @@ export const registerCutterCommands = (
             cutter,
             "cutter",
             "cutter_command",
-            undefined,
             signal,
           );
         }),

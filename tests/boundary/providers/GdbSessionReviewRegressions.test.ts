@@ -149,7 +149,7 @@ process.stdin.on("data", (chunk) => {
         parameters: {
           command: "-gdb-set auto-load off",
         },
-        normalized_result: {
+        raw_result: {
           process_exit_code: 7,
           process_exit_observed: true,
           completion_status: "unknown",
@@ -206,7 +206,7 @@ process.stdin.on("data", (chunk) => {
     if (!started.ok)
       expect(started.error.partialObservation).toMatchObject({
         predicate_type: "rea.debugger.startup-observation",
-        normalized_result: {
+        raw_result: {
           records: expect.arrayContaining([
             '~"automatic loading rejected',
             '"',
@@ -261,11 +261,11 @@ process.stdin.on("data", (chunk) => {
     if (!started.ok) {
       expect(started.error.cleanupIncomplete).toBe(true);
       expect(started.error.partialObservation).toMatchObject({
-        normalized_result: {
+        normalized_result: { output_invalid_utf8: true },
+        raw_result: {
           output_invalid_utf8: true,
           process_exit_observed: true,
         },
-        raw_result: null,
         limitations: expect.arrayContaining([
           expect.stringContaining("invalid UTF-8 bytes"),
         ]),
@@ -646,7 +646,7 @@ setTimeout(() => process.exit(0), 250);
         },
         partialObservation: {
           predicate_type: "rea.debugger.console-observation",
-          normalized_result: {
+          raw_result: {
             records: [
               '~"partial console record',
               '"',
@@ -775,15 +775,15 @@ process.stdin.on("data", (chunk) => {
       );
       expect(parsedEvidence.success).toBe(true);
       if (parsedEvidence.success) {
-        const observed = parsedEvidence.data.normalized_result;
-        expect(observed).toMatchObject({ records: expect.any(Array) });
+        const rawResult = parsedEvidence.data.raw_result;
+        expect(rawResult).toMatchObject({ records: expect.any(Array) });
         if (
-          typeof observed === "object" &&
-          observed !== null &&
-          !Array.isArray(observed) &&
-          "records" in observed
+          typeof rawResult === "object" &&
+          rawResult !== null &&
+          !Array.isArray(rawResult) &&
+          "records" in rawResult
         )
-          expect(observed.records).toHaveLength(300);
+          expect(rawResult.records).toHaveLength(300);
       }
     }
   },
@@ -836,7 +836,7 @@ process.stdin.on("data", (chunk) => {
       expect(result.error.partialObservation).toMatchObject({
         predicate_type: "rea.debugger.console-observation",
         parameters: { command: "shell sleep 600" },
-        normalized_result: {
+        raw_result: {
           command: "shell sleep 600",
           records: [
             '~"partial before cancellation',
@@ -1126,7 +1126,11 @@ process.stdin.on("data", (chunk) => {
           ],
           completion_status: "unknown",
         },
-        raw_result: null,
+        raw_result: {
+          command: "second command",
+          records: expect.not.arrayContaining(["~first-command-only"]),
+          completion_status: "unknown",
+        },
         limitations: expect.arrayContaining([
           expect.stringContaining(
             "only records retained for the active command",

@@ -13,6 +13,7 @@ import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import { localPathStringSchema } from "../domain/localPath.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 export const registerCaptureCommands = (
   cli: CliInstance,
@@ -60,6 +61,7 @@ export const registerCaptureCommands = (
             service,
             "tshark-capture",
             "inspect_packet_fields",
+            signal,
           ),
         ),
       ),
@@ -67,7 +69,9 @@ export const registerCaptureCommands = (
   cli.command(CLI_COMMANDS.inspectPacketCapture, {
     description:
       "Inspect an existing packet capture with caller-supplied TShark",
-    args: z.object({ path: z.string().describe("Local packet capture") }),
+    args: z.object({
+      path: localPathStringSchema.describe("Local packet capture"),
+    }),
     options: z
       .object({
         ...packetCaptureOptionsSchema.shape,
@@ -112,6 +116,7 @@ export const registerCaptureCommands = (
             service,
             "tshark-capture",
             "inspect_packet_capture",
+            signal,
           );
         }),
       ),

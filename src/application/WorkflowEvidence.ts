@@ -1,7 +1,7 @@
-import {
-  REA_WORKFLOW_PROVIDER,
-  workflowAnalysisProfile,
-} from "./InvestigationProviders.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+import { jsonStringByteLength } from "../domain/jsonStringByteLength.js";
+import { REA_WORKFLOW_PROVIDER } from "../domain/investigationProviders.js";
+import { workflowAnalysisProfile } from "./WorkflowAnalysisProfile.js";
 import type {
   AnalysisOperation,
   AnalysisOperationPort,
@@ -23,11 +23,45 @@ import {
 import type { JsonValue } from "../domain/jsonValue.js";
 import type { UnknownRegistryPort } from "./investigation/InvestigationRecordPort.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
+import { workflowUnknownInput } from "./investigation/WorkflowUnknown.js";
 import {
   renderSourceLimitations,
+  sourceLimitationGroupKey,
   sourceLimitationKey,
   type SourceLimitation,
 } from "./SourceLimitations.js";
+
+/**
+ * Bound for caveats a workflow observes once per item. Provider caveats can
+ * name per-item addresses, so they do not deduplicate and would otherwise grow
+ * with the number of items.
+ */
+export interface ComposedLimitationBudget {
+  /** Operations the workflow calls once per item. */
+  readonly perItemOperations: ReadonlySet<AnalysisOperation>;
+  /**
+   * First distinct per-item caveats retained, grouped by provider and text.
+   * Kept lines are rendered in the usual sorted order.
+   */
+  readonly maxDistinct: number;
+  /** Retained caveat text as JSON-encoded UTF-8 bytes; defaults to 8,000. */
+  readonly maxBytes?: number;
+  /** Where the omitted per-item caveats remain, as a clause. */
+  readonly retainedIn: string;
+}
+
+const DECOMPILE_ALL_LIMITATIONS: ComposedLimitationBudget = {
+  perItemOperations: new Set(["procedure_info", "procedure_pseudo_code"]),
+  maxDistinct: 8,
+  retainedIn:
+    "each function's record in decompile-index.json keeps the caveats of the observations it used",
+};
+
+/** The caveat budget for a composed workflow, when it has one. */
+export const composedLimitationBudget = (
+  operation: string,
+): ComposedLimitationBudget | undefined =>
+  operation === "decompile_all" ? DECOMPILE_ALL_LIMITATIONS : undefined;
 
 /** Retain the limits of exactly the observations used by one composed call. */
 export const executeComposedWorkflow = async (
@@ -35,16 +69,32 @@ export const executeComposedWorkflow = async (
   execute: (
     observed: AnalysisOperationPort,
   ) => Promise<Result<JsonValue, AnalysisError>>,
+  budget?: ComposedLimitationBudget,
 ): Promise<
   Result<
-    { readonly result: JsonValue; readonly limitations: readonly string[] },
+    {
+      readonly result: JsonValue;
+      readonly limitations: readonly string[];
+      readonly cachePolicy?: "live";
+      readonly evidenceLinks?: readonly string[];
+    },
     AnalysisError
   >
 > => {
   const limitations = new Map<string, SourceLimitation>();
+  const evidenceLinks = new Set<string>();
+  const perItemGroups = new Set<string>();
+  let perItemBytes = 0;
+  let omittedObservations = 0;
+  let cachePolicy: "live" | undefined;
   const result = await execute({
+    resourceScope: analysis.resourceScope,
     execute: async (operation, parameters, options) => {
       const execution = await analysis.execute(operation, parameters, options);
+      if (execution.ok && execution.value.evidenceId !== undefined)
+        evidenceLinks.add(execution.value.evidenceId);
+      if (execution.ok && execution.value.cachePolicy === "live")
+        cachePolicy = "live";
       if (execution.ok)
         for (const limitation of execution.value.limitations) {
           const fact = {
@@ -52,6 +102,28 @@ export const executeComposedWorkflow = async (
             operation,
             limitation,
           } satisfies SourceLimitation;
+          if (budget?.perItemOperations.has(operation) === true) {
+            // Reject oversized text before allocating a grouping key. Complete
+            // caveats are already retained by the export's per-function owner.
+            const maxBytes = budget.maxBytes ?? 8_000;
+            const bytes = jsonStringByteLength(limitation, maxBytes);
+            if (bytes > maxBytes) {
+              omittedObservations += 1;
+              continue;
+            }
+            const group = sourceLimitationGroupKey(fact);
+            if (!perItemGroups.has(group)) {
+              if (
+                perItemGroups.size >= budget.maxDistinct ||
+                perItemBytes + bytes > maxBytes
+              ) {
+                omittedObservations += 1;
+                continue;
+              }
+              perItemGroups.add(group);
+              perItemBytes += bytes;
+            }
+          }
           limitations.set(sourceLimitationKey(fact), fact);
         }
       return execution;
@@ -60,7 +132,18 @@ export const executeComposedWorkflow = async (
   if (!result.ok) return result;
   return ok({
     result: result.value,
-    limitations: renderSourceLimitations([...limitations.values()]),
+    limitations: [
+      ...renderSourceLimitations([...limitations.values()]),
+      ...(omittedObservations === 0
+        ? []
+        : [
+            `${omittedObservations} per-item provider limitation observation${omittedObservations === 1 ? " was" : "s were"} omitted from this answer; ${budget?.retainedIn}.`,
+          ]),
+    ],
+    ...(cachePolicy === undefined ? {} : { cachePolicy }),
+    ...(evidenceLinks.size === 0
+      ? {}
+      : { evidenceLinks: [...evidenceLinks].sort(compareUnicodeCodePoints) }),
   });
 };
 
@@ -72,6 +155,7 @@ export const createWorkflowEvidence = (input: {
   readonly result: JsonValue;
   readonly upstreamProfile: AnalysisProfileCommitment | undefined;
   readonly upstreamLimitations: readonly string[];
+  readonly upstreamEvidenceLinks?: readonly string[];
 }): Evidence =>
   createEvidence(input.target, REA_WORKFLOW_PROVIDER, {
     operation: input.operation,
@@ -86,6 +170,9 @@ export const createWorkflowEvidence = (input: {
           ),
         }),
     confidence: "derived",
+    ...(input.upstreamEvidenceLinks === undefined
+      ? {}
+      : { evidenceLinks: input.upstreamEvidenceLinks }),
     limitations: [
       "Derived by an REA composed workflow.",
       ...input.upstreamLimitations,
@@ -124,10 +211,18 @@ const batchProcedureLocations = (result: JsonValue): EvidenceLocation[] => {
 export const workflowSnapshotRecord = (
   evidence: Evidence,
   operation: AnalysisOperation,
+  bindingProfile: AnalysisProfileCommitment | undefined,
+  cachePolicy?: "live",
 ): WorkflowSnapshotRecordInput | undefined => {
-  if (evidence.analysis_profile === null) return undefined;
+  if (
+    evidence.analysis_profile === null ||
+    bindingProfile === undefined ||
+    cachePolicy === "live"
+  )
+    return undefined;
   return {
     operation,
+    bindingProfile,
     parameters: evidence.parameters,
     execution: {
       result: evidence.normalized_result,
@@ -180,12 +275,10 @@ export const recordWorkflowUnknowns = ({
     return { ok: true, value: null };
   for (const question of result.residual_unknowns) {
     if (typeof question !== "string") continue;
-    const recorded = recordUnknown({
+    const input = workflowUnknownInput(evidenceId, {
       question,
       severity: "medium",
       domain: name === "inspect_native_api" ? "native-api" : "control-flow",
-      supporting_evidence_ids: [evidenceId],
-      contradicting_evidence_ids: [],
       required_authority: "shipped-artifact",
       required_confidence: "observed",
       required_environment: null,
@@ -200,6 +293,8 @@ export const recordWorkflowUnknowns = ({
       ],
       relationships: [],
     });
+    if (!input.ok) return input;
+    const recorded = recordUnknown(input.value);
     if (
       !recorded.ok &&
       !(

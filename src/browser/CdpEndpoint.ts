@@ -2,6 +2,11 @@ import { request, type ClientRequest, type IncomingMessage } from "node:http";
 
 import { z } from "zod";
 
+import {
+  CDP_DISCOVERY_RESPONSE_TIMEOUT_MS,
+  cdpCommandTimeoutUnrelatedControl,
+  noRuntimeOverrideSentence,
+} from "../domain/browserDeadline.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { BrowserObservationError } from "../domain/browserObservationError.js";
@@ -9,7 +14,12 @@ import type { BrowserObservationOperation } from "../domain/browserObservationEr
 import { sanitizeBrowserUrl } from "../domain/browserObservation.js";
 import { urlDeclaresQueryOrFragment } from "../domain/urlComponents.js";
 import { safeParseJson } from "../domain/safeJson.js";
+import { WEB_RUNTIME_LIMITS } from "../domain/webRuntime.js";
 import type { CdpConnection } from "./CdpConnection.js";
+import {
+  parseCdpDiscoveryTargets,
+  type CdpDiscoveryTarget,
+} from "./CdpDiscoveryTargets.js";
 
 const endpointVersionSchema = z.object({
   Browser: z.string().min(1),
@@ -20,21 +30,35 @@ const endpointVersionSchema = z.object({
   webSocketDebuggerUrl: z.string().min(1),
 });
 
-const endpointTargetSchema = z.object({
-  id: z.string().min(1),
-  type: z.string().min(1),
-  title: z.string().default(""),
-  url: z.string(),
-  attached: z.boolean().nullable().optional(),
-  webSocketDebuggerUrl: z.string().min(1).optional(),
-});
-const endpointTargetsSchema = z.array(endpointTargetSchema);
-
-/** Per-response bounds for loopback CDP discovery documents. */
+/** Per-response bounds for loopback CDP discovery documents. There is no runtime override. */
 const CDP_DISCOVERY_RESPONSE_LIMITS = {
   bytes: 8 * 1024 * 1024,
-  timeoutMs: 10_000,
+  timeoutMs: CDP_DISCOVERY_RESPONSE_TIMEOUT_MS,
 } as const;
+
+const discoveryBudget = (phase: "response" | "browser-socket"): string =>
+  phase === "response"
+    ? `The ${String(CDP_DISCOVERY_RESPONSE_LIMITS.bytes)}-byte discovery document budget`
+    : `The ${String(WEB_RUNTIME_LIMITS.protocolBytes)}-byte browser-socket message budget`;
+
+const discoveryTimeout = (
+  operation: BrowserObservationOperation,
+  timeoutMs: number,
+  phase: "response" | "browser-socket",
+): BrowserObservationError => {
+  const subject =
+    phase === "response"
+      ? `CDP discovery response exceeded its ${String(timeoutMs)} ms deadline.`
+      : `CDP browser-socket discovery exceeded its ${String(timeoutMs)} ms deadline.`;
+  const fixed = noRuntimeOverrideSentence(
+    `${discoveryBudget(phase)} and the ${String(timeoutMs)} ms discovery deadline stay fixed.`,
+    cdpCommandTimeoutUnrelatedControl(operation),
+  );
+  return new BrowserObservationError(operation, "timeout", {
+    detail: `${subject} ${fixed}`,
+    remediationAction: fixed,
+  });
+};
 
 interface CdpDiscoveryResponseLimits {
   readonly bytes: number;
@@ -84,6 +108,7 @@ export interface CdpEndpointTarget {
 }
 
 export interface CdpEndpointDiscovery {
+  readonly limitations?: readonly string[];
   readonly webSocket: CdpWebSocketEndpoint;
   readonly version: {
     readonly product: string;
@@ -116,12 +141,12 @@ export const discoverCdpEndpoint = async (
     versionInput,
     operation,
   );
-  const targets = parseCdpEndpointValue(
-    endpointTargetsSchema,
+  const { targets, limitations } = parseCdpDiscoveryTargets(
     targetsInput,
     operation,
   );
   return {
+    limitations,
     webSocket: safeCdpWebSocketEndpoint(
       endpoint,
       version.webSocketDebuggerUrl,
@@ -157,21 +182,46 @@ export const withCdpDiscoveryDeadline = async <T>(
   timeoutMs: number = CDP_DISCOVERY_RESPONSE_LIMITS.timeoutMs,
 ): Promise<T> => {
   const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), timeoutMs);
+  let abortSource: "caller" | "deadline" | undefined;
+  let abortReason: unknown;
+  const abort = (source: "caller" | "deadline", reason: unknown): void => {
+    if (abortSource !== undefined) return;
+    abortSource = source;
+    abortReason = reason;
+    deadline.abort(reason);
+  };
+  const onCallerAbort = (): void => {
+    if (signal?.aborted === true) abort("caller", signal.reason);
+  };
+  const timer = setTimeout(
+    () => abort("deadline", new Error("CDP discovery deadline exceeded")),
+    timeoutMs,
+  );
+  signal?.addEventListener("abort", onCallerAbort, { once: true });
+  onCallerAbort();
   try {
-    return await work(
-      signal === undefined
-        ? deadline.signal
-        : AbortSignal.any([signal, deadline.signal]),
-    );
+    return await work(deadline.signal);
   } catch (cause: unknown) {
-    if (deadline.signal.aborted && signal?.aborted !== true)
-      throw new BrowserObservationError(operation, "timeout", {
-        detail: `CDP browser-socket discovery exceeded its ${String(timeoutMs)} ms deadline.`,
-      });
+    if (cause === abortReason) {
+      if (abortSource === "caller")
+        throw new AnalysisCancelledError(operation, { cause: abortReason });
+      if (abortSource === "deadline")
+        throw discoveryTimeout(operation, timeoutMs, "browser-socket");
+    }
+    // A concrete failure produced before cancellation remains authoritative.
+    if (cause instanceof AnalysisError) {
+      if (
+        abortSource === "deadline" &&
+        cause instanceof AnalysisCancelledError &&
+        cause.cause === abortReason
+      )
+        throw discoveryTimeout(operation, timeoutMs, "browser-socket");
+      throw cause;
+    }
     throw cause;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onCallerAbort);
   }
 };
 
@@ -380,10 +430,14 @@ const pathIdentifier = (
 
 const targetWebSocket = (
   endpoint: string,
-  target: z.infer<typeof endpointTargetSchema>,
+  target: CdpDiscoveryTarget,
   operation: BrowserObservationOperation,
 ): { readonly webSocket?: CdpPageWebSocketEndpoint } => {
-  if (target.webSocketDebuggerUrl === undefined) return {};
+  if (
+    typeof target.webSocketDebuggerUrl !== "string" ||
+    target.webSocketDebuggerUrl.length === 0
+  )
+    return {};
   try {
     const webSocket = safeCdpWebSocketEndpoint(
       endpoint,
@@ -409,7 +463,7 @@ export const readCdpJson = async (
 ): Promise<unknown> =>
   await new Promise((resolve, reject) => {
     if (signal?.aborted === true) {
-      reject(new AnalysisCancelledError(operation));
+      reject(new AnalysisCancelledError(operation, { cause: signal.reason }));
       return;
     }
     let response: IncomingMessage | undefined;
@@ -431,7 +485,7 @@ export const readCdpJson = async (
     };
     const onAbort = (): void => {
       if (signal?.aborted === true)
-        finish(new AnalysisCancelledError(operation));
+        finish(new AnalysisCancelledError(operation, { cause: signal.reason }));
     };
     request_ = request(
       url,
@@ -456,7 +510,10 @@ export const readCdpJson = async (
           if (bytes > limits.bytes) {
             finish(
               new BrowserObservationError(operation, "payload_limit", {
-                detail: `CDP discovery response exceeds its ${String(limits.bytes)} byte limit.`,
+                detail: noRuntimeOverrideSentence(
+                  `CDP discovery response exceeds its ${String(limits.bytes)}-byte limit.`,
+                  cdpCommandTimeoutUnrelatedControl(operation),
+                ),
               }),
             );
             return;
@@ -506,12 +563,7 @@ export const readCdpJson = async (
     onAbort();
     if (settled) return;
     timer = setTimeout(
-      () =>
-        finish(
-          new BrowserObservationError(operation, "timeout", {
-            detail: `CDP discovery response exceeded its ${String(limits.timeoutMs)} ms deadline.`,
-          }),
-        ),
+      () => finish(discoveryTimeout(operation, limits.timeoutMs, "response")),
       limits.timeoutMs,
     );
     request_.end();
@@ -523,7 +575,8 @@ const endpointFailure = (
   signal?: AbortSignal,
 ): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
-  if (signal?.aborted === true) return new AnalysisCancelledError(operation);
+  if (signal?.aborted === true)
+    return new AnalysisCancelledError(operation, { cause: signal.reason });
   return new BrowserObservationError(operation, "endpoint_unreachable", {
     cause,
   });

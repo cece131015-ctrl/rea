@@ -40,6 +40,30 @@ describe("htmlUrlReferences", () => {
     ]);
   });
 
+  it("reports each source attribute once when parse5 reconstructs formatting elements", () => {
+    for (const html of [
+      `<p><a href="/about">About<p>More</a>`,
+      `<ul><li><a href="/docs/">Docs</li><li>Other</li></ul>`,
+      `<p><font style="background:url(/bg.png)">x<p>y`,
+    ])
+      expect(
+        htmlUrlReferences(html).map(({ kind, valueRange }) => [
+          kind,
+          html.slice(valueRange.start, valueRange.end),
+        ]),
+      ).toHaveLength(1);
+  });
+
+  it("never reports a base element inside template content", () => {
+    const html = `<template><base href="https://other.test/"></template><base href=""><img src="a.png">`;
+    expect(
+      htmlUrlReferences(html).map(({ kind, value }) => [kind, value]),
+    ).toEqual([
+      ["base", ""],
+      ["url", "a.png"],
+    ]);
+  });
+
   it("names sibling attribute spans for later removal", () => {
     const html = `<script src="a.js" integrity="sha256-x" crossorigin></script>`;
     const [reference] = htmlUrlReferences(html);

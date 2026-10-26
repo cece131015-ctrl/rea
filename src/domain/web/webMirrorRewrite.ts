@@ -46,16 +46,18 @@ const encodePath = (path: string): string =>
 /**
  * Resolve one reference. Captured HTTP(S) URLs become paths relative to the
  * view file; uncaptured relative URLs become absolute so offline links never
- * silently point at missing local files. Fragment-only, non-HTTP and
- * unparseable references are left exactly as written.
+ * silently point at missing local files. Non-HTTP and unparseable references
+ * are left exactly as written, and so are empty and fragment-only references
+ * that stay in the same document (`sameDocument`).
  */
 const resolveReference = (
   raw: string,
   base: URL,
   context: RewriteContext,
+  sameDocument: boolean,
 ): ReferenceOutcome => {
   const reference = trimAsciiWhitespace(raw);
-  if (reference === "" || reference.startsWith("#"))
+  if (sameDocument && (reference === "" || reference.startsWith("#")))
     return { kind: "unchanged" };
   let url: URL;
   try {
@@ -79,6 +81,12 @@ const resolveReference = (
     kind: "local",
     value: `${encodePath(relative === "" ? posix.basename(target) : relative)}${fragment}`,
   };
+};
+
+const withoutFragment = (url: URL): string => {
+  const copy = new URL(url.href);
+  copy.hash = "";
+  return copy.href;
 };
 
 interface Edit extends TextRange {
@@ -108,7 +116,8 @@ export const rewriteCss = (
   let unresolved = 0;
   const edits: Edit[] = [];
   for (const reference of cssUrlReferences(text)) {
-    const outcome = resolveReference(reference.url, base, context);
+    // Fragment-only CSS URLs always refer to the current document.
+    const outcome = resolveReference(reference.url, base, context, true);
     if (outcome.kind === "unchanged") continue;
     if (outcome.kind === "local") rewritten += 1;
     else unresolved += 1;
@@ -150,17 +159,19 @@ export const rewriteHtml = (
   context: RewriteContext,
 ): RewrittenText => {
   const references = htmlUrlReferences(text);
+  // The first base element with an href attribute sets the document base,
+  // even when its value is empty; an unparseable value leaves the document URL.
+  const declaredBase = references.find(({ kind }) => kind === "base");
   let base = documentUrl;
-  const declaredBase = references.find(
-    (reference) =>
-      reference.kind === "base" && trimAsciiWhitespace(reference.value) !== "",
-  );
   if (declaredBase !== undefined)
     try {
       base = new URL(trimAsciiWhitespace(declaredBase.value), documentUrl);
     } catch {
-      // An invalid base href leaves the document URL as the base.
+      base = documentUrl;
     }
+  // The view's base is its own file, so empty and fragment-only references
+  // keep their meaning only when the original base was the document itself.
+  const sameDocument = withoutFragment(base) === withoutFragment(documentUrl);
   let rewritten = 0;
   let unresolved = 0;
   const edits: Edit[] = [];
@@ -174,7 +185,10 @@ export const rewriteHtml = (
       if (reference === declaredBase)
         edits.push({
           ...reference.valueRange,
-          replacement: encodeAttribute("./", reference.quote),
+          replacement: encodeAttribute(
+            encodePath(posix.basename(context.fromPath)),
+            reference.quote,
+          ),
         });
       continue;
     }
@@ -203,7 +217,12 @@ export const rewriteHtml = (
       let changed = "";
       let position = 0;
       for (const candidate of srcsetCandidates(reference.value)) {
-        const outcome = resolveReference(candidate.url, base, context);
+        const outcome = resolveReference(
+          candidate.url,
+          base,
+          context,
+          sameDocument,
+        );
         count(outcome);
         if (outcome.kind === "unchanged") continue;
         local ||= outcome.kind === "local";
@@ -214,7 +233,12 @@ export const rewriteHtml = (
       }
       value = changed + reference.value.slice(position);
     } else {
-      const outcome = resolveReference(reference.value, base, context);
+      const outcome = resolveReference(
+        reference.value,
+        base,
+        context,
+        sameDocument,
+      );
       count(outcome);
       if (outcome.kind !== "unchanged") value = outcome.value;
       local = outcome.kind === "local";

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { startBrowserVerifierSite } from "./fixtures/browser-verifier-site.mjs";
 import { verifyBrowserDomDestinations } from "./lib/browser-dom-destinations-e2e.mjs";
-import { closeVerifierResources } from "./lib/verifier-cleanup.mjs";
+import { withVerifierCleanup } from "./lib/verifier-cleanup.mjs";
 import { requireOrdinaryWindowsVerifierCaller } from "./lib/windows-ordinary-user-verifier.mjs";
 
 const executable = process.env.REA_BROWSER_EXECUTABLE;
@@ -17,8 +17,7 @@ let profile;
 let site;
 let context;
 let report;
-let primaryError;
-try {
+await withVerifierCleanup(async () => {
   profile = await mkdtemp(join(tmpdir(), "rea-browser-dom-"));
   site = await startBrowserVerifierSite();
   context = await chromium.launchPersistentContext(profile, {
@@ -56,15 +55,12 @@ try {
     native_oracle: true,
     verified: true,
   };
-} catch (cause) {
-  primaryError = cause;
-  throw cause;
-} finally {
-  const cleanup = [];
-  if (context !== undefined) cleanup.push(() => context.close());
-  if (site !== undefined) cleanup.push(() => site.close());
-  if (profile !== undefined)
-    cleanup.push(() => rm(profile, { recursive: true, force: true }));
-  await closeVerifierResources(cleanup, primaryError);
-}
+}, [
+  () => context?.close(),
+  () => site?.close(),
+  async () => {
+    if (profile !== undefined)
+      await rm(profile, { recursive: true, force: true });
+  },
+]);
 process.stdout.write(`${JSON.stringify(report)}\n`);

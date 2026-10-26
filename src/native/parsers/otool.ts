@@ -1,3 +1,8 @@
+import {
+  legacyMachoPlatform,
+  type MachoVersionMinPlatform,
+} from "../../domain/apple/machoPlatform.js";
+
 interface ParsedSection {
   readonly segment: string;
   readonly name: string;
@@ -20,6 +25,7 @@ interface ParsedSegment {
 }
 
 interface ParsedLoadCommands {
+  readonly cpuType: number | null;
   readonly commands: Array<{
     index: number;
     kind: string;
@@ -39,8 +45,8 @@ interface ParsedLoadCommands {
     sdk: string | null;
     tools: Array<{ name: string; version: string }>;
   }>;
-  uuid: string | null;
   readonly flags: Set<string>;
+  readonly omittedDependencyCommands: string[];
 }
 
 const DYLIB_COMMANDS = new Set([
@@ -51,6 +57,11 @@ const DYLIB_COMMANDS = new Set([
   "LC_LAZY_LOAD_DYLIB",
   "LC_LOAD_UPWARD_DYLIB",
 ]);
+/**
+ * Dependency commands whose install name is not in the otool command text.
+ * `LC_LAZY_LOAD_DYLIB_INFO` stores it in a linkedit payload.
+ */
+const PAYLOAD_DEPENDENCY_COMMANDS = new Set(["LC_LAZY_LOAD_DYLIB_INFO"]);
 
 const DYLIB_FIELDS = [
   "cmd",
@@ -62,6 +73,14 @@ const DYLIB_FIELDS = [
 // otool prints options for dylib_use_command and a timestamp for dylib_command.
 const DYLIB_ENCODING_FIELDS = ["time stamp", "options"];
 const EMPTY_VALUE_FIELDS = new Set(["options", "segname", "sectname"]);
+
+const VERSION_MIN_PLATFORMS: ReadonlyMap<string, MachoVersionMinPlatform> =
+  new Map([
+    ["LC_VERSION_MIN_MACOSX", 1],
+    ["LC_VERSION_MIN_IPHONEOS", 2],
+    ["LC_VERSION_MIN_TVOS", 3],
+    ["LC_VERSION_MIN_WATCHOS", 4],
+  ]);
 
 /**
  * Non-verbose otool prints LC_BUILD_VERSION platform and tool codes as
@@ -129,7 +148,7 @@ export const parseOtoolLoadCommands = (raw: string) => {
   const header = parseHeader(output);
   if (header === undefined)
     throw new TypeError("otool output is missing the Mach header");
-  const state = createLoadCommandState(header.flags);
+  const state = createLoadCommandState(header.flags, header.cpuType);
   for (const block of output.split(/(?=^Load command \d+$)/mu))
     parseLoadCommand(block, state);
   validateLoadCommandFraming(header, state.commands);
@@ -138,10 +157,10 @@ export const parseOtoolLoadCommands = (raw: string) => {
     endian: header.cpuType === null ? null : cpuEndian(header.cpuType),
     fileType: header.fileType,
     flags: [...state.flags].sort(),
-    uuid: state.uuid,
     commands: state.commands,
     segments: state.segments,
     dependencies: state.dependencies,
+    omittedDependencyCommands: state.omittedDependencyCommands,
     entrypoints: state.entrypoints,
     builds: state.builds,
   };
@@ -257,14 +276,16 @@ const validateLoadCommandFraming = (
 
 const createLoadCommandState = (
   headerFlags: readonly string[] | undefined,
+  cpuType: number | null,
 ): ParsedLoadCommands => ({
+  cpuType,
   commands: [],
   segments: [],
   dependencies: [],
   entrypoints: [],
   builds: [],
-  uuid: null,
   flags: new Set(headerFlags ?? []),
+  omittedDependencyCommands: [],
 });
 
 const parseLoadCommand = (block: string, state: ParsedLoadCommands): void => {
@@ -286,10 +307,11 @@ const parseLoadCommand = (block: string, state: ParsedLoadCommands): void => {
     kind,
     fields,
   });
-  collectUuid(kind, fields, state);
   collectEntrypoint(kind, fields, state);
   collectBuild(kind, block, fields, state);
   collectDependency(kind, fields, state);
+  if (PAYLOAD_DEPENDENCY_COMMANDS.has(kind))
+    state.omittedDependencyCommands.push(kind);
   collectSegment(kind, block, fields, state);
 };
 
@@ -353,15 +375,6 @@ const scalarFields = (kind: string): readonly string[] => {
   return common;
 };
 
-const collectUuid = (
-  kind: string,
-  fields: Readonly<Record<string, string | number | null>>,
-  state: ParsedLoadCommands,
-): void => {
-  if (kind === "LC_UUID")
-    state.uuid = stringField(fields, "uuid") ?? state.uuid;
-};
-
 const collectEntrypoint = (
   kind: string,
   fields: Readonly<Record<string, string | number | null>>,
@@ -393,13 +406,23 @@ const collectBuild = (
     });
     return;
   }
-  if (kind.startsWith("LC_VERSION_MIN_"))
+  if (kind.startsWith("LC_VERSION_MIN_")) {
+    const platform = kind.slice("LC_VERSION_MIN_".length) || null;
+    const devicePlatform = VERSION_MIN_PLATFORMS.get(kind);
+    const derivedPlatform =
+      devicePlatform === undefined
+        ? undefined
+        : legacyMachoPlatform(devicePlatform, state.cpuType);
     state.builds.push({
-      platform: kind.slice("LC_VERSION_MIN_".length) || null,
+      platform:
+        derivedPlatform === undefined || derivedPlatform === devicePlatform
+          ? platform
+          : buildCodeName(BUILD_PLATFORM_NAMES, String(derivedPlatform)),
       minimum_os: stringField(fields, "version"),
       sdk: stringField(fields, "sdk"),
       tools: [],
     });
+  }
 };
 
 const collectDependency = (
@@ -450,7 +473,7 @@ const parseFields = (block: string): ParsedFields => {
   for (const field of rows)
     if (field !== undefined)
       occurrences.set(field[0], (occurrences.get(field[0]) ?? 0) + 1);
-  const fields: Record<string, string | number | null> = {};
+  const fields = new Map<string, string | number | null>();
   const ordinals = new Map<string, number>();
   for (const field of rows) {
     if (field === undefined) continue;
@@ -459,22 +482,51 @@ const parseFields = (block: string): ParsedFields => {
     ordinals.set(key, ordinal);
     const label =
       (occurrences.get(key) ?? 0) > 1 ? `${key} #${String(ordinal)}` : key;
-    fields[label] = TEXT_FIELDS.test(key) ? value : (numeric(value) ?? value);
+    fields.set(
+      label,
+      TEXT_FIELDS.test(key) ? value : (numeric(value) ?? value),
+    );
   }
-  return { values: fields, rows };
+  return { values: Object.fromEntries(fields), rows };
 };
 
 /** Names and linker options are text even when they look numeric. */
 const TEXT_FIELDS = /^(?:segname|sectname|string #\d+)$/u;
 
+/**
+ * otool prints load-command strings as `<key> %s (offset %u)`: exactly one
+ * separator space on each side of the recorded string, whose own leading and
+ * trailing whitespace belongs to the Mach-O value.
+ */
+const OFFSET_STRING_FIELD = /^(name|path) (.* \(offset \d+\))$/u;
+
+/**
+ * otool prints segment and section names as `<key> %.16s`: one separator
+ * space, then the fixed-width name, whose own leading and trailing whitespace
+ * belongs to the Mach-O value.
+ */
+const MACHO_NAME_FIELD = /^(segname|sectname)(?: (.*))?$/u;
+
 const parseField = (rawLine: string): readonly [string, string] | undefined => {
+  const offsetString = OFFSET_STRING_FIELD.exec(rawLine.trimStart());
+  if (offsetString?.[1] !== undefined && offsetString[2] !== undefined)
+    return [offsetString[1], offsetString[2]];
+  const name = MACHO_NAME_FIELD.exec(rawLine.trimStart());
+  if (name?.[1] !== undefined) return [name[1], name[2] ?? ""];
   // otool prints each linker option as `string #n <option>`; keep the option
   // exactly, including surrounding spaces, under otool's ordinal label.
   const option = /^\s*(string #[1-9]\d*)(?: (.*))?$/u.exec(rawLine);
   if (option?.[1] !== undefined) return [option[1], option[2] ?? ""];
+  const fixedName = /^\s*(segname|sectname) (.*)$/u.exec(rawLine);
+  if (fixedName?.[1] !== undefined) return [fixedName[1], fixedName[2] ?? ""];
   const line = rawLine.trim();
-  // Match time stamp as a whole without swallowing `name stamp plugin.dylib`.
-  const match = /^((?:time stamp)|\S+(?:\s+version)?)(?:\s+(.+))?$/u.exec(line);
+  // These are the compound field labels used by otool. Keeping this list
+  // explicit prevents a one-word field value such as `sectname version` from
+  // being consumed as an invented `sectname version` key.
+  const match =
+    /^(time stamp|current version|compatibility version|\S+)(?:\s+(.+))?$/u.exec(
+      line,
+    );
   return match?.[1] === undefined
     ? undefined
     : [match[1], match[2]?.trim() ?? ""];
@@ -625,7 +677,7 @@ const hexField = (
 };
 
 const stripOffsetSuffix = (value: string | null): string =>
-  value?.replace(/\s+\(offset\s+\d+\)$/u, "") ?? "unknown";
+  value?.replace(/ \(offset \d+\)$/u, "") ?? "unknown";
 
 const sectionAlignment = (raw: string | null): number | null => {
   if (raw === null) return null;

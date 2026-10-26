@@ -83,9 +83,37 @@ describe("curated Windows test lane", () => {
     );
   });
 
+  it("keeps real Git dependency-patch admission in the Windows lane", async () => {
+    expect(await explicitPaths("windows")).toContain(
+      "tests/boundary/filesystem/releaseProposal.test.ts",
+    );
+  });
+
+  it("keeps Windows environment identity and layered setup regressions in the lane", async () => {
+    expect(await explicitPaths("windows")).toEqual(
+      expect.arrayContaining([
+        "tests/boundary/filesystem/clientConfigurationEnvironment.test.ts",
+        "tests/boundary/filesystem/clientConfigurationLayeredEnvironment.test.ts",
+        "tests/acceptance/setup/registrationRuntimeEnvironmentCli.test.ts",
+      ]),
+    );
+  });
+
   it("keeps packed bridge verification under the retained native runtime lease in the lane", async () => {
     expect(await explicitPaths("windows")).toContain(
       "tests/boundary/process/packedBridgeVerification.test.ts",
+    );
+  });
+
+  it("keeps Windows-only path and snapshot admission cases in the lane", async () => {
+    // These files have cases that run only on Windows, so outside this lane
+    // CI never executes them.
+    expect(await explicitPaths("windows")).toEqual(
+      expect.arrayContaining([
+        "src/contracts/sessionPathInputs.test.ts",
+        "tests/boundary/filesystem/directAnalysisSnapshotReplay.test.ts",
+        "tests/boundary/mcp/rawBinaryMcp.test.ts",
+      ]),
     );
   });
 
@@ -126,3 +154,16 @@ it("keeps every explicit focused CI test path executable after file moves", asyn
   );
   expect(missing.filter((path) => path !== undefined)).toEqual([]);
 }, 10_000);
+
+it("checks the complete source with the fallback compiler before Windows build reuse", async () => {
+  const workflow = workflowSchema.parse(
+    parse(await readFile(WORKFLOW, "utf8")),
+  );
+  const steps = workflow.jobs["windows-curated"]?.steps ?? [];
+  const checked = steps.findIndex(
+    (step) => step.run === "npm run typecheck -- --checkers 2",
+  );
+  const built = steps.findIndex((step) => step.run === "npm run build:cached");
+  expect(checked).toBeGreaterThan(-1);
+  expect(built).toBeGreaterThan(checked);
+});

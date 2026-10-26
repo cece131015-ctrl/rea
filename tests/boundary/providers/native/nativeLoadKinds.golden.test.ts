@@ -165,6 +165,92 @@ it("retains the empty segment name of a Mach-O object file", () => {
   ).toThrow("otool field vmaddr has no value");
 });
 
+it.each([
+  { label: "segment", segmentName: "version", sectionName: "__mysect" },
+  { label: "section", segmentName: "__DATA", sectionName: "version" },
+])(
+  "preserves a legal $label name equal to a compound field word",
+  ({ segmentName, sectionName }) => {
+    const output = [
+      "Load command 0",
+      "      cmd LC_SEGMENT_64",
+      "  cmdsize 152",
+      `  segname ${segmentName}`,
+      "   vmaddr 0x0000000000000000",
+      "   vmsize 0x0000000000000018",
+      "  fileoff 0",
+      " filesize 24",
+      "  maxprot 0x00000007",
+      " initprot 0x00000007",
+      "   nsects 1",
+      "    flags 0x0",
+      "Section",
+      `  sectname ${sectionName}`,
+      `   segname ${segmentName}`,
+      "      addr 0x0000000000000000",
+      "      size 0x0000000000000018",
+      "    offset 0",
+      "     align 2^2 (4)",
+      "    flags 0x80000400",
+      "",
+    ].join("\n");
+
+    const parsed = parseOtoolLoadCommands(withOtoolMachHeader(output));
+
+    expect(parsed.commands[0]?.fields.segname).toBe(segmentName);
+    expect(parsed.segments).toMatchObject([
+      {
+        name: segmentName,
+        sections: [{ segment: segmentName, name: sectionName }],
+      },
+    ]);
+  },
+);
+
+it("keeps the surrounding spaces of segment and section names", () => {
+  // Captured from `otool -l` on an object whose section is " sec " in segment
+  // " seg ": otool prints one space after the label, then the stored name.
+  const output = [
+    "Load command 0",
+    "      cmd LC_SEGMENT_64",
+    "  cmdsize 152",
+    "  segname ",
+    "   vmaddr 0x0000000000000000",
+    "   vmsize 0x0000000000000008",
+    "  fileoff 184",
+    " filesize 8",
+    "  maxprot 0x00000007",
+    " initprot 0x00000007",
+    "   nsects 1",
+    "    flags 0x0",
+    "Section",
+    "  sectname  sec ",
+    "   segname  seg ",
+    "      addr 0x0000000000000000",
+    "      size 0x0000000000000008",
+    "    offset 184",
+    "     align 2^0 (1)",
+    "    reloff 0",
+    "    nreloc 0",
+    "     flags 0x00000000",
+    " reserved1 0",
+    " reserved2 0",
+    "",
+  ].join("\n");
+
+  expect(
+    parseOtoolLoadCommands(withOtoolMachHeader(output)).segments,
+  ).toMatchObject([
+    { name: "", sections: [{ segment: " seg ", name: " sec " }] },
+  ]);
+
+  const named = parseOtoolLoadCommands(
+    withOtoolMachHeader(output.replace("  segname \n", "  segname  seg \n")),
+  );
+  expect(named.commands[0]?.fields.segname).toBe(" seg ");
+  expect(named.segments[0]?.name).toBe(" seg ");
+});
+
 it("preserves dependency install names that begin with the word stamp", () => {
   const load = parseOtoolLoadCommands(
     withOtoolMachHeader(
@@ -192,6 +278,49 @@ it("preserves dependency install names that begin with the word stamp", () => {
     ],
   ).toMatch(/^2 Thu Jan/);
 });
+
+it.each([
+  ["surrounding spaces", "  leading.dylib  "],
+  ["surrounding tabs", "\tleading.dylib\t"],
+  ["version prefix", "version 2.dylib"],
+  ["embedded offset annotation", "named (offset 99)"],
+  ["numeric name", "123"],
+  ["ordinary control", "leading.dylib"],
+])(
+  "preserves dependency install-name whitespace: %s",
+  (_label, installName) => {
+    const load = parseOtoolLoadCommands(
+      withOtoolMachHeader(
+        [
+          "Load command 0",
+          "          cmd LC_LOAD_DYLIB",
+          "      cmdsize 48",
+          `         name ${installName} (offset 24)`,
+          "   time stamp 2 Thu Jan  1 00:00:02 1970",
+          "      current version 0.0.0",
+          "compatibility version 0.0.0",
+          "Load command 1",
+          "          cmd LC_RPATH",
+          "      cmdsize 32",
+          `         path ${installName} (offset 12)`,
+          "",
+        ].join("\n"),
+      ),
+    );
+    expect(load.dependencies).toEqual([
+      {
+        path: installName,
+        kind: "LC_LOAD_DYLIB",
+        current_version: "0.0.0",
+        compatibility_version: "0.0.0",
+      },
+    ]);
+    expect(load.commands.map((command) => command.fields)).toMatchObject([
+      { name: `${installName} (offset 24)` },
+      { path: `${installName} (offset 12)` },
+    ]);
+  },
+);
 
 it("normalizes legacy version-minimum commands into build metadata", () => {
   const load = parseOtoolLoadCommands(

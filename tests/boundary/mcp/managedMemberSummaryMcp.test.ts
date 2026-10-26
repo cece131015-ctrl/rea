@@ -119,6 +119,7 @@ it("summarizes selected members and pages every original collection after the fi
     unmatched_type_names: ["Missing.Type"],
   });
   expect(view.summary.coverage).toEqual(report.coverage);
+  expect(view.summary.method_rows).toEqual({ offset: 0, count: 2, total: 2 });
   expect(view.summary.signature_resolution).toBe("type-names-v1");
   expect(view.summary.identity_scope).toEqual(report.identity_scope);
   expect(view.summary).not.toHaveProperty("methods");
@@ -167,6 +168,7 @@ it("summarizes selected members and pages every original collection after the fi
       expect(page.signature_resolution).toBe("type-names-v1");
       expect(page.selection).toEqual(report.selection);
       expect(page.coverage.total).toBe(rows.length);
+      expect(page.method_rows).toEqual(report.method_rows);
       paged.push(...page.page.rows);
       offset = page.coverage.next_offset;
     }
@@ -176,7 +178,7 @@ it("summarizes selected members and pages every original collection after the fi
   expect(JSON.stringify(session.evidenceById(parent.evidence_id))).toBe(
     original,
   );
-  const portable = inspectAnalysisView({
+  const portable = await inspectAnalysisView({
     source: { kind: "inline", evidence: parent },
     view: { kind: "summary" },
   });
@@ -211,7 +213,7 @@ it("keeps collections that historical member Evidence never examined unknown", a
     limitations: parent.limitations,
     authority: parent.authority,
   });
-  const summary = inspectAnalysisView({
+  const summary = await inspectAnalysisView({
     source: { kind: "inline", evidence: historical },
     view: { kind: "summary" },
   });
@@ -227,13 +229,13 @@ it("keeps collections that historical member Evidence never examined unknown", a
   expect(view.unknowns.join(" ")).toContain("no recorded subject");
   for (const collection of ["exported_types", "user_strings"] as const)
     expect(
-      inspectAnalysisView({
+      await inspectAnalysisView({
         source: { kind: "inline", evidence: historical },
         view: { kind: "managed-members", collection, offset: 0, limit: 1 },
       }),
     ).toMatchObject({ ok: false, error: { _tag: "AnalysisInputError" } });
   expect(
-    inspectAnalysisView({
+    await inspectAnalysisView({
       source: { kind: "inline", evidence: historical },
       view: { kind: "managed", collection: "attributes", offset: 0, limit: 1 },
     }),

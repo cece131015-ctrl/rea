@@ -62,9 +62,9 @@ describe("DeepSeek Harness configuration paths", () => {
         configPath: join(home, dshRoot, "cordis.patch.yml"),
         markerPath: join(home, dshRoot),
       });
-      expect(clientSkillDirectories(home, ["dsh"], environment)).toEqual([
-        { client, directory: join(home, agentsRoot, "skills") },
-      ]);
+      expect(
+        clientSkillDirectories(home, ["dsh"], environment).directories,
+      ).toEqual([{ client, directory: join(home, agentsRoot, "skills") }]);
     },
   );
 
@@ -82,9 +82,9 @@ describe("DeepSeek Harness configuration paths", () => {
         configPath: join(root, "cordis.patch.yml"),
         markerPath: root,
       });
-      expect(clientSkillDirectories(home, ["dsh"], environment)).toEqual([
-        { client: "dsh", directory: join(root, "skills") },
-      ]);
+      expect(
+        clientSkillDirectories(home, ["dsh"], environment).directories,
+      ).toEqual([{ client: "dsh", directory: join(root, "skills") }]);
     },
   );
 
@@ -103,7 +103,7 @@ describe("DeepSeek Harness configuration paths", () => {
     expect(
       clientSkillDirectories(join("/home/a"), ["dsh"], {
         DSH_AGENTS_HOME: "/custom/agents",
-      }),
+      }).directories,
     ).toEqual([
       { client: "dsh", directory: resolve("/custom/agents", "skills") },
     ]);
@@ -1788,8 +1788,9 @@ describe("DeepSeek Harness runtime environment validation", () => {
         { HOPPER_LOADER_ARGS_JSON: "{" },
         command,
       ),
-    ).rejects.toMatchObject({
-      settings: [{ setting: "HOPPER_LOADER_ARGS_JSON" }],
+    ).resolves.toMatchObject({
+      status: "invalid",
+      remediation: expect.stringContaining("HOPPER_LOADER_ARGS_JSON"),
     });
     await expect(
       inspectClientConfiguration(
@@ -1797,8 +1798,9 @@ describe("DeepSeek Harness runtime environment validation", () => {
         { REA_GHIDRA_LANGUAGE_ID: "" },
         command,
       ),
-    ).rejects.toMatchObject({
-      settings: [{ setting: "REA_GHIDRA_LANGUAGE_ID" }],
+    ).resolves.toMatchObject({
+      status: "invalid",
+      remediation: expect.stringContaining("REA_GHIDRA_LANGUAGE_ID"),
     });
     expect(
       await inspectClientConfiguration(
@@ -2079,8 +2081,16 @@ describe("DeepSeek Harness ownership and editability", () => {
     const host = systemUninstallHost(home);
     expect(await host.inspectClient(client)).toMatchObject({
       status: "failed",
+      detail: expect.stringContaining(
+        "Expression-backed Cordis IDs have unknown ownership; use literal IDs",
+      ),
     });
-    expect((await host.removeClient(client)).status).toBe("failed");
+    expect(await host.removeClient(client)).toMatchObject({
+      status: "failed",
+      detail: expect.stringContaining(
+        "Expression-backed Cordis IDs have unknown ownership; use literal IDs",
+      ),
+    });
     expect(await readFile(client.configPath, "utf8")).toBe(initial);
     await expect(
       readFile(`${client.configPath}.rea.backup`),
@@ -2439,4 +2449,25 @@ ${row("second-launcher")}`,
       { insert: [{ id: "user-a", name: "plugin-a" }] },
     ]);
   });
+});
+
+it("keeps Cordis YAML syntax failures distinct from unresolved ID ownership", async () => {
+  const { home, client } = await harnessClient();
+  const initial = "- insert: [{id: [unterminated\n";
+  await writeFile(client.configPath, initial);
+  const host = systemUninstallHost(home);
+  try {
+    const inspected = await host.inspectClient(client);
+    expect(inspected).toMatchObject({
+      status: "failed",
+      detail: expect.stringContaining("Invalid or unsupported Cordis YAML"),
+    });
+    expect(inspected?.detail).not.toContain("unknown ownership");
+    expect(await readFile(client.configPath, "utf8")).toBe(initial);
+    await expect(
+      readFile(`${client.configPath}.rea.backup`),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await host.close?.();
+  }
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { inspectWebPageInputSchema } from "../domain/browserObservation.js";
 import { captureDom } from "./CdpCaptureDocuments.js";
-import { capturedSvgNodeKind } from "./CdpCaptureDomSvg.js";
+import { capturedSvgNodeKind } from "./CdpCaptureDomNamespaces.js";
 import { CdpCaptureCompleteness } from "./CdpCaptureCompleteness.js";
 
 const origin = "https://app.example.test";
@@ -56,6 +56,43 @@ const capture = (value: ReturnType<typeof snapshot>) => {
   const step = captureDom(value, new Set([origin]), input).next();
   if (!step.done) throw new Error("Unexpected SVG identity query");
   return step.value;
+};
+
+const prefixedXhtmlSnapshot = () => {
+  const strings = [
+    `${origin}/root/prefixed.xhtml`,
+    `${origin}/assets/`,
+    "#document",
+    "h:html",
+    "h:head",
+    "h:base",
+    "h:body",
+    "h:form",
+    "h:button",
+    "",
+    "xmlns:h",
+    "http://www.w3.org/1999/xhtml",
+    "href",
+    "/assets/",
+    "action",
+    "formaction",
+  ];
+  return {
+    strings,
+    documents: [
+      {
+        documentURL: 0,
+        baseURL: 1,
+        nodes: {
+          nodeType: [9, 1, 1, 1, 1, 1, 1],
+          nodeName: [2, 3, 4, 5, 6, 7, 8],
+          nodeValue: [9, 9, 9, 9, 9, 9, 9],
+          parentIndex: [-1, 0, 1, 2, 1, 4, 5],
+          attributes: [[], [10, 11], [], [12, 13], [], [14, 9], [15, 9]],
+        },
+      },
+    ],
+  };
 };
 
 describe("DOM metadata document base URLs", () => {
@@ -190,6 +227,37 @@ describe("DOM metadata document base URLs", () => {
     expect(result.nodes).toEqual([]);
     expect(result.urls).toEqual([]);
     expect(result.agentHints).toEqual([]);
+  });
+});
+
+describe("prefixed XHTML form destinations", () => {
+  it("resolves empty actions to the document URL", () => {
+    const result = captureDom(
+      prefixedXhtmlSnapshot(),
+      new Set([origin]),
+      input,
+    ).next();
+    if (!result.done) throw new Error("Unexpected SVG identity query");
+    expect(result.value.urls).toEqual([
+      {
+        node_index: 3,
+        attribute: "href",
+        url: `${origin}/assets/`,
+        destination_scope: "approved",
+      },
+      {
+        node_index: 5,
+        attribute: "action",
+        url: `${origin}/root/prefixed.xhtml`,
+        destination_scope: "approved",
+      },
+      {
+        node_index: 6,
+        attribute: "formaction",
+        url: `${origin}/root/prefixed.xhtml`,
+        destination_scope: "approved",
+      },
+    ]);
   });
 });
 

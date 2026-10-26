@@ -2,20 +2,29 @@ import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { SafeOutputTree } from "../artifacts/SafeOutputTree.js";
+import { outputDirectoryAdmissionRefusal } from "../artifacts/SafeOutputTreeAdmission.js";
 import {
   selectMirrorCapture,
   type SelectedMirrorCapture,
 } from "../browser/assets/MirrorCapture.js";
-import { publishWebMirror } from "../browser/assets/PublishWebMirror.js";
-import { AnalysisInputError } from "../domain/analysisErrorCore.js";
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import {
+  publishWebMirror,
+  type MirrorCaptureFile,
+} from "../browser/assets/PublishWebMirror.js";
+import {
+  AnalysisCancelledError,
+  AnalysisCapabilityUnavailableError,
+  AnalysisInputError,
+} from "../domain/analysisErrorCore.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
   browserScenarioSchema,
   type BrowserScenario,
 } from "../domain/browserScenario.js";
 import { createEvidence, type Evidence } from "../domain/evidence.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
-import { jsonObjectSchema, jsonValueSchema } from "../domain/jsonValue.js";
+import { bufferedJsonParts, jsonParts } from "../domain/jsonSerialization.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   cloneWebsiteInputSchema,
@@ -27,8 +36,11 @@ import {
 import { webMirrorExportError } from "../domain/webScriptExportError.js";
 import type { ExecutionOptions } from "./AnalysisProvider.js";
 import type { BrowserScenarioCapturePort } from "./BrowserScenarioCapturePort.js";
-import { captureBrowserScenario } from "./BrowserScenarioCaptureService.js";
-import { WEB_MIRROR_EXPORT_PROVIDER as PROVIDER } from "./InvestigationProviders.js";
+import {
+  BROWSER_SCENARIO_PROVIDER_ID,
+  captureBrowserScenario,
+} from "./BrowserScenarioCaptureService.js";
+import { WEB_MIRROR_EXPORT_PROVIDER as PROVIDER } from "../domain/investigationProviders.js";
 import {
   mapWebCaptureExportFailure,
   readSavedWebCapture,
@@ -84,7 +96,12 @@ export const exportWebMirrorValidated = async (
       ]),
     );
   try {
-    options.signal?.throwIfAborted();
+    if (options.signal?.aborted)
+      return err(
+        new AnalysisCancelledError(EXPORT_OPERATION, {
+          cause: options.signal.reason,
+        }),
+      );
     const prepared = await readSavedWebCapture(
       input.capture_path,
       MIRROR_CAPTURE_READER,
@@ -93,13 +110,13 @@ export const exportWebMirrorValidated = async (
     );
     if (!prepared.ok) return prepared;
     const { bytes, loaded } = prepared.value;
-    options.signal?.throwIfAborted();
     const digest = sha256(bytes);
     const result = await publishWebMirror(
       input.output_directory,
       loaded,
       { path: input.capture_path, sha256: digest },
       {
+        operation: EXPORT_OPERATION,
         resources,
         error: webMirrorExportError(EXPORT_OPERATION),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -116,7 +133,7 @@ export const exportWebMirrorValidated = async (
             capture_path: input.capture_path,
             output_directory: input.output_directory,
           },
-          result: jsonValueSchema.parse(result),
+          result,
           rawResult: null,
           confidence: "derived",
           authority: "historical-reference",
@@ -129,15 +146,10 @@ export const exportWebMirrorValidated = async (
     );
   } catch (cause: unknown) {
     return err(
-      mapWebCaptureExportFailure(
-        cause,
-        MIRROR_CAPTURE_READER,
-        {
-          capturePath: input.capture_path,
-          outputDirectory: input.output_directory,
-        },
-        options.signal,
-      ),
+      mapWebCaptureExportFailure(cause, MIRROR_CAPTURE_READER, {
+        capturePath: input.capture_path,
+        outputDirectory: input.output_directory,
+      }),
     );
   }
 };
@@ -195,6 +207,24 @@ export const cloneWebsiteValidated = async (
     );
   const scenario = cloneScenario(input, executable);
   if (!scenario.ok) return scenario;
+  // The page runs and contacts servers during capture, so refuse a
+  // destination that can never be published before launching anything.
+  const destination = await checkCloneDestination(input.output_directory);
+  if (!destination.ok) return destination;
+  if (dependencies.browser === undefined)
+    return err(
+      new AnalysisCapabilityUnavailableError(
+        BROWSER_SCENARIO_PROVIDER_ID,
+        CLONE_OPERATION,
+        "browser scenario provider is not configured",
+      ),
+    );
+  if (options.signal?.aborted)
+    return err(
+      new AnalysisCancelledError(CLONE_OPERATION, {
+        cause: options.signal.reason,
+      }),
+    );
   const captured = await captureBrowserScenario(
     dependencies.browser,
     scenario.value,
@@ -202,40 +232,36 @@ export const cloneWebsiteValidated = async (
   );
   if (!captured.ok) return captured;
   const evidence = captured.value;
-  const persisted = Buffer.from(JSON.stringify(evidence));
   const error = webMirrorExportError(CLONE_OPERATION);
   let result: WebMirrorExportResult;
   try {
-    options.signal?.throwIfAborted();
     result = await publishWebMirror(
       input.output_directory,
       selectMirrorCapture(evidence),
-      { path: "capture.json", sha256: sha256(persisted), persist: persisted },
+      persistedCapture(evidence),
       {
+        operation: CLONE_OPERATION,
         resources: dependencies.resources,
         error,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       },
     );
   } catch (cause: unknown) {
+    // The completed capture stays available when its mirror is not.
     return err(
       mapWebCaptureExportFailure(
         cause,
         { operation: CLONE_OPERATION, providerId: PROVIDER.id, error },
         { capturePath: input.url, outputDirectory: input.output_directory },
-        options.signal,
-      ),
+      ).retainPartialObservation(evidence),
     );
   }
   return ok(
     createEvidence(undefined, PROVIDER, {
       predicateType: "rea.website-clone",
       operation: CLONE_OPERATION,
-      parameters: jsonObjectSchema.parse({
-        ...input,
-        browser_executable_path: executable,
-      }),
-      result: jsonValueSchema.parse(result),
+      parameters: { ...input, browser_executable_path: executable },
+      result,
       rawResult: null,
       confidence: "observed",
       authority: "controlled-replay",
@@ -246,6 +272,56 @@ export const cloneWebsiteValidated = async (
       evidenceLinks: [evidence.evidence_id],
     }),
   );
+};
+
+/** Read-only early admission; publication still creates the root exclusively. */
+const checkCloneDestination = async (
+  outputDirectory: string,
+): Promise<Result<void, AnalysisError>> => {
+  try {
+    await SafeOutputTree.checkDestination(outputDirectory);
+    return ok(undefined);
+  } catch (cause: unknown) {
+    const refusal = outputDirectoryAdmissionRefusal(
+      CLONE_OPERATION,
+      "output_directory",
+      cause,
+    );
+    return err(
+      refusal instanceof AnalysisError
+        ? refusal
+        : mapWebCaptureExportFailure(
+            refusal,
+            {
+              operation: CLONE_OPERATION,
+              providerId: PROVIDER.id,
+              error: webMirrorExportError(CLONE_OPERATION),
+            },
+            { capturePath: "", outputDirectory },
+          ),
+    );
+  }
+};
+
+/**
+ * The capture Evidence as capture.json. Retained bodies can exceed the
+ * longest string V8 allows, so the JSON is digested and later written in
+ * bounded parts; both passes serialize the same value identically.
+ */
+const persistedCapture = (evidence: Evidence): MirrorCaptureFile => {
+  const parts = (): Iterable<string> => bufferedJsonParts(jsonParts(evidence));
+  const hash = createHash("sha256");
+  let bytes = 0;
+  for (const part of parts()) {
+    const chunk = Buffer.from(part, "utf8");
+    hash.update(chunk);
+    bytes += chunk.byteLength;
+  }
+  return {
+    path: "capture.json",
+    sha256: hash.digest("hex"),
+    persist: { bytes, parts },
+  };
 };
 
 const inputError = (

@@ -1,3 +1,5 @@
+import { observeMzWindowsHeader } from "../domain/dosMz.js";
+import { readPeCoffHeader } from "../domain/peCoffHeader.js";
 import { readElfFixedHeader } from "../domain/elfFixedHeader.js";
 import { decodePeMachine } from "../domain/peMachine.js";
 import type { ResolvedElectronFuseFile } from "./ElectronFusePath.js";
@@ -16,6 +18,7 @@ import {
   type ElectronFuseSentinel,
   type ElectronFuseSlice,
 } from "../domain/electron/electronFuses.js";
+import { machoImageSlices } from "../domain/apple/dylibResolution.js";
 import {
   RegularFileChangedError,
   sameRegularFileState,
@@ -52,6 +55,7 @@ interface SliceRange {
   readonly fileOffset: number;
   readonly size: number;
   readonly architecture: string | null;
+  readonly hidden?: boolean;
 }
 
 /** The selected container is malformed or outside the supported formats. */
@@ -149,7 +153,7 @@ export const readElectronFuseImage = async (
     path,
     options?.resources ?? new ArtifactResourceScope(),
     signal,
-    async (owned) => {
+    async ({ handle: owned }) => {
       const opened = await owned.stat({ bigint: true });
       if (!sameRegularFileState(before, opened))
         throw new RegularFileChangedError(path);
@@ -259,11 +263,12 @@ const identifyMacho = async (
     );
   }
   const format = isFat(head) ? "mach-o-universal" : "mach-o";
-  const slices = facts.slices.map((slice, index) => ({
+  const slices = machoImageSlices(facts).map((slice, index) => ({
     index,
     fileOffset: slice.slice_offset,
     size: slice.slice_size,
     architecture: slice.architecture,
+    ...(slice.hidden === undefined ? {} : { hidden: slice.hidden }),
   }));
   assertNonOverlappingSlices(slices);
   return {
@@ -340,6 +345,9 @@ const scanSlices = async (
       file_offset: state.slice.fileOffset,
       size: state.slice.size,
       architecture: state.slice.architecture,
+      ...(state.slice.hidden === undefined
+        ? {}
+        : { hidden: state.slice.hidden }),
       sentinel_count: sentinels.length,
       sentinels,
     });
@@ -477,25 +485,32 @@ const identifyPe = async (
   const header = await readAt(0, 64);
   if (header.length < 64 || header[0] !== 0x4d || header[1] !== 0x5a)
     return undefined;
-  const offset = Buffer.from(
+  const prefix = Buffer.from(
     header.buffer,
     header.byteOffset,
     header.byteLength,
-  ).readUInt32LE(0x3c);
+  );
+  const observed = observeMzWindowsHeader(prefix, size);
+  if (observed.state !== "signature-needed" && observed.state !== "declared")
+    return undefined;
+  const offset = observed.offset;
   if (
-    !Number.isSafeInteger(offset) ||
     offset < 64 ||
     offset > ELECTRON_FUSE_LIMITS.maximumPeHeaderOffset ||
     offset > size - 4
   )
     return undefined;
   const bytes = Buffer.from(await readAt(offset, 24));
-  if (bytes.length < 4 || bytes.readUInt32LE(0) !== 0x00004550)
+  const confirmed = observeMzWindowsHeader(prefix, size, { offset, bytes });
+  if (confirmed.state !== "declared" || confirmed.signature !== "PE")
     return undefined;
   // A signature establishes the existing scan boundary; only a complete COFF
   // header establishes its machine. Managed OS overrides need separate proof.
+  const coff = readPeCoffHeader(bytes.subarray(4));
   const machine =
-    bytes.length === 24 ? decodePeMachine(bytes.readUInt16LE(4)) : undefined;
+    bytes.length === 24 && coff.ok
+      ? decodePeMachine(coff.value.machine)
+      : undefined;
   return {
     architecture:
       machine?.nativeOsOverride === false ? machine.architecture : null,

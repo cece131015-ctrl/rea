@@ -479,13 +479,13 @@ def authorize_display(
         authorized = subprocess.run(
             [
                 xauth_path,
+                "-q",
                 "-f",
                 str(authority),
-                "add",
-                display_name,
-                ".",
-                secrets.token_hex(16),
+                "source",
+                "-",
             ],
+            input=("add %s . %s\n" % (display_name, secrets.token_hex(16))).encode("ascii"),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -580,7 +580,11 @@ def start_xvfb(
     authority = session / "Xauthority"
     collision: AdapterFailure | None = None
     for _ in range(3):
-        display_number = args.display_number or (100 + secrets.randbelow(900))
+        display_number = (
+            args.display_number
+            if args.display_number is not None
+            else 100 + secrets.randbelow(900)
+        )
         display_name = f":{display_number}"
         if Path(f"/tmp/.X11-unix/X{display_number}").exists() or Path(
             f"/tmp/.X{display_number}-lock"

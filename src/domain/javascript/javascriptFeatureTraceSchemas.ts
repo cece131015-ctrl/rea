@@ -2,8 +2,7 @@ import { z } from "zod";
 
 import { evidenceSchema, providerSchema } from "../evidence.js";
 import { javascriptApplicationGraphSchema } from "./javascriptApplicationGraph.js";
-import { digestSchema } from "../digests.js";
-import { prefixedDigestSchema } from "../digests.js";
+import { digestSchema, prefixedDigestSchema } from "../digests.js";
 
 const evidenceIdSchema = prefixedDigestSchema("ev");
 const nodeIdSchema = prefixedDigestSchema("jag_node");
@@ -161,15 +160,15 @@ export const applicationFeatureTraceResultSchema = z.strictObject({
   paths: z.array(tracePathSchema),
   native_handoffs: z.array(nativeHandoffSchema),
   summary: z.strictObject({
-    matched_seeds: z.number().int().min(0),
-    traced_nodes: z.number().int().min(0),
-    traced_edges: z.number().int().min(0),
-    terminal_paths: z.number().int().min(0),
-    native_handoffs: z.number().int().min(0),
-    observed_facts: z.number().int().min(0),
-    inferred_facts: z.number().int().min(0),
-    unknown_facts: z.number().int().min(0),
-    unavailable_facts: z.number().int().min(0),
+    matched_seeds: z.int().min(0),
+    traced_nodes: z.int().min(0),
+    traced_edges: z.int().min(0),
+    terminal_paths: z.int().min(0),
+    native_handoffs: z.int().min(0),
+    observed_facts: z.int().min(0),
+    inferred_facts: z.int().min(0),
+    unknown_facts: z.int().min(0),
+    unavailable_facts: z.int().min(0),
   }),
   coverage: z.strictObject({
     status: z.enum(["complete-within-source", "partial", "no-match"]),
@@ -179,7 +178,7 @@ export const applicationFeatureTraceResultSchema = z.strictObject({
       "unknown",
       "unavailable",
     ]),
-    total_seed_matches: z.number().int().min(0),
+    total_seed_matches: z.int().min(0),
   }),
   evidence_links: z.array(evidenceIdSchema).min(1),
   limitations: z.array(boundedTextSchema),
@@ -189,9 +188,6 @@ export type TraceApplicationFeatureInput = z.infer<
   typeof traceApplicationFeatureInputSchema
 >;
 export type ApplicationFeatureSeed = z.output<
-  typeof applicationFeatureSeedSchema
->;
-export type ApplicationFeatureSeedInput = z.input<
   typeof applicationFeatureSeedSchema
 >;
 export type ApplicationFeatureTraceResult = z.infer<

@@ -89,9 +89,11 @@ describe("script capture identity and response projection", () => {
       ({ kind }) => kind !== "network-content",
     );
     capture.events.retained = capture.events.items.length;
-    expect(selectScriptCapture(capture).scripts[0]?.content).toMatchObject({
+    expect(selectScriptCapture(capture).scripts[0]?.content).toEqual({
       state: "unavailable",
       reason: "response-content-not-retained",
+      message:
+        "No selected, completed script response bytes were retained for this request.",
     });
   });
 

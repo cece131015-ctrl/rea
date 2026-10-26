@@ -7,7 +7,8 @@ import type {
 } from "../application/AnalysisProvider.js";
 import type { ToolContract } from "../contracts/toolContractTypes.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
-import { createEvidence, type Evidence } from "../domain/evidence.js";
+import type { Evidence } from "../domain/evidence.js";
+import { createAnalysisExecutionEvidence } from "../domain/analysisObservation.js";
 import { jsonObjectSchema, type JsonValue } from "../domain/jsonValue.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { ok, type Result } from "../domain/result.js";
@@ -16,6 +17,11 @@ import { mcpProgressReporter } from "./mcpProgress.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import type { WithAdmittedAnalysis } from "./analysisAdmission.js";
+import { recordEvidenceSources } from "../application/investigation/recordEvidenceSources.js";
+import {
+  reportOperationStart,
+  reportOperationEnd,
+} from "./operationProgress.js";
 
 interface EvidenceToolRegistration {
   readonly logger: Logger;
@@ -25,10 +31,6 @@ interface EvidenceToolRegistration {
   readonly analysisForAdmission?: (
     analysis: AnalysisOperationPort,
   ) => AnalysisOperationPort;
-  readonly sourceEvidence?: (
-    operation: Exclude<AnalysisOperation, "health">,
-    result: import("../domain/jsonValue.js").JsonValue,
-  ) => readonly Evidence[];
   readonly parametersForExecution?: (
     operation: Exclude<AnalysisOperation, "health">,
     parameters: Readonly<Record<string, JsonValue>>,
@@ -61,10 +63,8 @@ export const registerEvidenceTools = (
       contract.name,
       toolRegistrationOptions(contract),
       async (input, context) => {
-        const ready = options.preflight?.(
-          contract.name,
-          jsonObjectSchema.parse(input),
-        );
+        const parameters = jsonObjectSchema.parse(input);
+        const ready = options.preflight?.(contract.name, parameters);
         if (ready !== undefined && !ready.ok)
           return server.delivery.toCallToolResult(ready, contract);
         const admitted = await options.withAdmittedAnalysis(
@@ -75,13 +75,7 @@ export const registerEvidenceTools = (
               options.analysisForAdmission?.(admittedAnalysis) ??
               admittedAnalysis;
             const progress = mcpProgressReporter(context);
-            await progress.report({
-              phase: contract.name,
-              completed: 0,
-              total: 1,
-              message: "started",
-            });
-            const parameters = jsonObjectSchema.parse(input);
+            await reportOperationStart(progress, contract.name);
             const executionParameters =
               options.parametersForExecution?.(contract.name, parameters) ??
               parameters;
@@ -94,44 +88,29 @@ export const registerEvidenceTools = (
                   progress,
                 }),
             );
-            await progress.report({
-              phase: contract.name,
-              completed: 1,
-              total: 1,
-              message: execution.ok ? "completed" : "failed",
-              terminal: true,
-            });
+            await reportOperationEnd(progress, contract.name, execution.ok);
             if (!execution.ok)
               return server.delivery.toCallToolResult(execution, contract);
-            const sourceEvidence =
-              options.sourceEvidence?.(contract.name, execution.value.result) ??
-              [];
-            const evidence = createEvidence(
-              execution.value.subject ?? options.activeTarget?.(),
-              execution.value.provider,
+            const sourceEvidence = execution.value.sourceEvidence ?? [];
+            const evidence = createAnalysisExecutionEvidence(
+              contract.name,
+              options.parametersForEvidence?.(contract.name, parameters) ??
+                parameters,
               {
-                operation: contract.name,
-                parameters:
-                  options.parametersForEvidence?.(contract.name, parameters) ??
-                  parameters,
-                result: execution.value.result,
-                ...(execution.value.analysisProfile === undefined
-                  ? {}
-                  : { analysisProfile: execution.value.analysisProfile }),
-                rawResult: execution.value.rawResult,
-                limitations: execution.value.limitations,
-                locations: execution.value.locations,
-                evidenceLinks: sourceEvidence.map(({ evidence_id: id }) => id),
+                ...execution.value,
+                subject:
+                  execution.value.subject === undefined
+                    ? (options.activeTarget?.() ?? null)
+                    : execution.value.subject,
               },
+              "observed",
             );
-            for (const source of sourceEvidence) {
-              const sourceRecorded = options.recordEvidence?.(source);
-              if (sourceRecorded !== undefined && !sourceRecorded.ok)
-                return server.delivery.toCallToolResult(
-                  sourceRecorded,
-                  contract,
-                );
-            }
+            const sourceRecorded = recordEvidenceSources(
+              options.recordEvidence,
+              sourceEvidence,
+            );
+            if (!sourceRecorded.ok)
+              return server.delivery.toCallToolResult(sourceRecorded, contract);
             const projected =
               options.projectEvidence?.(contract.name, parameters, evidence) ??
               ok(evidence);

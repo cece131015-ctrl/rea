@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,6 +12,7 @@ import {
 } from "vitest";
 import { z } from "zod";
 import { projectAnalysisError } from "../../src/domain/analysisErrorProjection.js";
+import { ProviderCleanupError } from "../../src/domain/providerCleanupError.js";
 import { PwntoolsRecordedCrashProvider } from "../../src/native/pwntools/PwntoolsRecordedCrashProvider.js";
 import type { PwntoolsLauncher } from "../../src/native/pwntools/PwntoolsDecoder.js";
 import {
@@ -25,6 +26,10 @@ import {
 import { prepareProcessOwnershipInspection } from "../../src/process/ProcessOwnershipObservation.js";
 import { spawnOwnedProviderProcess } from "../../src/process/ProviderProcess.js";
 import { PrivateRuntimeRoot } from "../../src/process/PrivateRuntimeRoot.js";
+import {
+  withArtifactFileHandle,
+  ArtifactFileCleanupFailure,
+} from "../../src/artifacts/ArtifactFileOperation.js";
 import * as artifacts from "../../src/artifacts/readStableArtifact.js";
 import {
   recordedCrashFixture,
@@ -269,12 +274,15 @@ it.runIf(supportedHost).each([
     expect(projected.code).toBe("cleanup_incomplete");
     if (retainedOwnership === undefined)
       throw new Error("Expected retained process ownership");
-    expect(projected.details?.resources).toEqual([
-      retainedOwnership.runId,
-      root.path,
-      `pid:${retainedOwnership.leaderPid}`,
-      `process-group:${retainedOwnership.processGroupId}`,
-    ]);
+    expect(projected.details?.resources).toEqual(
+      expect.arrayContaining([
+        retainedOwnership.runId,
+        root.path,
+        `pid:${retainedOwnership.leaderPid}`,
+        `process-group:${retainedOwnership.processGroupId}`,
+      ]),
+    );
+    expect(projected.details?.resources).toHaveLength(4);
     if (stage === "debugger")
       expect(projected).toMatchObject({
         details: {
@@ -365,6 +373,129 @@ it.runIf(supportedHost)(
     cleanupAllowed = true;
     await provider.close();
     expect(() => process.kill(debuggerPid, 0)).toThrow();
+    await expect(access(root.path)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
+it.runIf(supportedHost).each(["decoder", "debugger"])(
+  "does not reinterpret a completed %s read when retention cancels after failed close",
+  async (stage) => {
+    const { path, root, environment, basic } = await fixture();
+    const controller = new AbortController();
+    const reason = { stage: "retention callback after owner completion" };
+    const reply = join(
+      root.path,
+      ...(stage === "debugger" ? ["debugger"] : []),
+      "reply.json",
+    );
+    const read = artifacts.readStableArtifact;
+    let injected = false;
+    let releaseAllowed = false;
+    const closeFailure = new Error("reply close refused");
+    const emergencyCloses: (() => Promise<void>)[] = [];
+    vi.spyOn(artifacts, "readStableArtifact").mockImplementation(
+      async (...args) => {
+        if (args[0] !== reply || injected) return read(...args);
+        injected = true;
+        const resources = args[4];
+        if (resources === undefined)
+          throw new Error("Reply must have an artifact resource owner");
+        const file = await open(reply, "r");
+        const close = file.close.bind(file);
+        emergencyCloses.push(close);
+        file.close = async () => {
+          if (!releaseAllowed) throw closeFailure;
+          await close();
+        };
+        const retain = resources.retain.bind(resources);
+        const spy = vi
+          .spyOn(resources, "retain")
+          .mockImplementation((owner) => {
+            retain(owner);
+            controller.abort(reason);
+          });
+        try {
+          return await withArtifactFileHandle(
+            reply,
+            file,
+            resources,
+            controller.signal,
+            () => read(...args),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      },
+    );
+    let launches = 0;
+    const provider = new PwntoolsRecordedCrashProvider(
+      environment,
+      async (spawn) => {
+        if (++launches === 1) return basic(spawn);
+        await writeFile(
+          reply,
+          JSON.stringify({ ok: true, value: recordedCrashDebuggerFixture() }),
+        );
+        return spawnOwnedProviderProcess({
+          ...spawn,
+          arguments: ["-e", "process.stdout.write('debugger diagnostic')"],
+        });
+      },
+      async () => root,
+    );
+    onTestFinished(async () => {
+      releaseAllowed = true;
+      try {
+        await provider.close();
+      } finally {
+        await Promise.all(emergencyCloses.map((close) => close()));
+      }
+    });
+    const result = await provider.inspectAndClose(
+      { path, include_debugger_context: true },
+      { signal: controller.signal },
+    );
+    if (result.ok) throw new Error("Expected the physical reply-close failure");
+    expect(controller.signal.reason).toBe(reason);
+    if (stage === "debugger") {
+      expect(result.error).toBeInstanceOf(ProviderCleanupError);
+      expect(result.error.diagnostics).toMatchObject({
+        stage: "debugger_reply_descriptor_close",
+      });
+      expect(result.error.partialObservation).toMatchObject({
+        artifact: { path },
+        debugger: {
+          status: "available",
+          connection: "core",
+          maps: recordedCrashDebuggerFixture().maps,
+          diagnostics: { stdout: "debugger diagnostic" },
+        },
+      });
+    } else expect(result.error._tag).toBe("AnalysisOutputError");
+    expect(result.error.cause).toBeInstanceOf(ArtifactFileCleanupFailure);
+    if (!(result.error.cause instanceof ArtifactFileCleanupFailure))
+      throw new Error("Expected exact file owner");
+    expect(result.error.cause.fileCleanupFailure.outcome.kind).toBe(
+      "completed",
+    );
+    expect(result.error.cause.fileCleanupFailure.cleanupCause).toBe(
+      closeFailure,
+    );
+    expect(
+      result.error.cause.fileCleanupFailure.completionCancellation,
+    ).toBeUndefined();
+    expect(result.error.cleanupIncomplete).toBe(true);
+    const observation = result.error.partialObservation;
+    await expect(provider.close()).rejects.toMatchObject({
+      cleanupIncomplete: true,
+    });
+    await expect(access(root.path)).resolves.toBeUndefined();
+    releaseAllowed = true;
+    await provider.close();
+    expect(result.error.cleanupIncomplete).toBe(false);
+    expect(result.error.cleanupResources).toEqual([]);
+    expect(result.error.partialObservation).toBe(observation);
+    expect(result.error.capturedOutput?.stdout).toContain("basic diagnostic");
     await expect(access(root.path)).rejects.toMatchObject({ code: "ENOENT" });
   },
 );

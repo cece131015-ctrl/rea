@@ -10,7 +10,6 @@ import {
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
-import { jsonObjectSchema, jsonValueSchema } from "../../domain/jsonValue.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import {
   cloneLocalApplicationInputSchema,
@@ -24,7 +23,7 @@ import {
 } from "../../domain/localApplications.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import type { ExecutionOptions } from "../AnalysisProvider.js";
-import { LOCAL_APPLICATION_PROVIDER as PROVIDER } from "../InvestigationProviders.js";
+import { LOCAL_APPLICATION_PROVIDER as PROVIDER } from "../../domain/investigationProviders.js";
 import {
   classifyApplicationPath,
   discoverLocalApplications,
@@ -83,15 +82,8 @@ export const findLocalApplicationsValidated = async (
   host: LocalApplicationHost,
   options: ExecutionOptions = {},
 ): Promise<Result<Evidence, AnalysisError>> => {
-  const invalidRoot = input.search_roots?.find((root) => !isAbsolute(root));
-  if (invalidRoot !== undefined)
-    return err(
-      inputError(
-        FIND_OPERATION,
-        ["search_roots"],
-        `search_roots must be absolute filesystem paths; received ${invalidRoot}.`,
-      ),
-    );
+  const roots = searchRootsError(FIND_OPERATION, input.search_roots);
+  if (roots !== undefined) return err(roots);
   try {
     const discovery = localApplicationDiscoverySchema.parse(
       await discoverLocalApplications(
@@ -105,8 +97,8 @@ export const findLocalApplicationsValidated = async (
       createEvidence(undefined, PROVIDER, {
         predicateType: "rea.local-application-discovery",
         operation: FIND_OPERATION,
-        parameters: jsonObjectSchema.parse(input),
-        result: jsonValueSchema.parse(discovery),
+        parameters: input,
+        result: discovery,
         rawResult: null,
         confidence: "observed",
         authority: "shipped-artifact",
@@ -158,6 +150,8 @@ export const cloneLocalApplicationValidated = async (
         "output_directory must be an absolute filesystem path on this host.",
       ),
     );
+  const roots = searchRootsError(CLONE_OPERATION, input.search_roots);
+  if (roots !== undefined) return err(roots);
   let selected: Result<
     { readonly application: LocalApplication; readonly considered: number },
     AnalysisError
@@ -238,8 +232,8 @@ export const cloneLocalApplicationValidated = async (
     createEvidence(undefined, PROVIDER, {
       predicateType: "rea.local-application-clone",
       operation: CLONE_OPERATION,
-      parameters: jsonObjectSchema.parse(input),
-      result: jsonValueSchema.parse(clone),
+      parameters: input,
+      result: clone,
       rawResult: null,
       confidence: "observed",
       authority: "shipped-artifact",
@@ -266,6 +260,21 @@ const unsafeCopy = (
   if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)))
     return `output_directory ${outputDirectory} is inside the application being copied (${root}); choose a directory outside it.`;
   return undefined;
+};
+
+/** Search roots name host directories; a relative one would follow the server's cwd. */
+const searchRootsError = (
+  operation: string,
+  roots: readonly string[] | undefined,
+): AnalysisInputError | undefined => {
+  const relativeRoot = roots?.find((root) => !isAbsolute(root));
+  return relativeRoot === undefined
+    ? undefined
+    : inputError(
+        operation,
+        ["search_roots"],
+        `search_roots must be absolute filesystem paths; received ${relativeRoot}.`,
+      );
 };
 
 const inputError = (

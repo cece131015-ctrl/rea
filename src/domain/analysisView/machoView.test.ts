@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { inspectMachoSchema } from "../native/nativeInspection.js";
 
 import {
   projectAnalysisView,
@@ -7,6 +8,7 @@ import {
 
 const symbol = (name: string) => ({
   name,
+  runtime_name: name.slice(1),
   address: null,
   weak: null,
   reexport: null,
@@ -105,6 +107,30 @@ const parent = (
   normalizedResult,
   subject,
   limitations: ["Parent limitation."],
+});
+
+it("preserves ambiguous import facts without adding import fields to exports", () => {
+  const imported = {
+    ...symbol("unused"),
+    name: null,
+    runtime_name: null,
+    raw_name: "_value+0x4",
+    name_status: "ambiguous",
+    addend: null,
+  };
+  const observed = { ...report, imports: coverage([imported], false) };
+  for (const facet of ["imports", "exports"] as const) {
+    const projected = projectAnalysisView(parent(observed), {
+      kind: "macho",
+      facet,
+      offset: 0,
+      limit: 64,
+    });
+    if (!projected.ok) throw projected.error;
+    expect(projected.value.kind === "macho" && projected.value.item).toEqual(
+      observed[facet].items,
+    );
+  }
 });
 
 describe("Mach-O analysis views", () => {
@@ -243,4 +269,17 @@ describe("Mach-O analysis views", () => {
     expect(malformed.ok).toBe(false);
     if (!malformed.ok) expect(malformed.error._tag).toBe("AnalysisInputError");
   });
+});
+
+it("validates a prototype-named command field rather than dropping an invalid value", () => {
+  const fields =
+    inspectMachoSchema.shape.load_commands.shape.items.element.shape.fields;
+  const parsed = fields.safeParse(
+    Object.fromEntries([["__proto__", { invalid: true }]]),
+  );
+  expect(parsed.success).toBe(false);
+  if (parsed.success) throw new Error("Expected an invalid command field");
+  expect(parsed.error.issues).toContainEqual(
+    expect.objectContaining({ path: ["__proto__"] }),
+  );
 });

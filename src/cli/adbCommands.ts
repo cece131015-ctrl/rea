@@ -5,7 +5,10 @@ import type { AdbDeviceAnalysisPort } from "../application/adb/AdbDeviceAnalysis
 import { createAdbDeviceAnalysisProvider } from "../composition/adb.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
-import type { AdbOperation } from "../domain/adb/adbDeviceAnalysis.js";
+import {
+  MAX_ADB_ACTIVITY_EXTRAS,
+  type AdbOperation,
+} from "../domain/adb/adbDeviceAnalysis.js";
 import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
@@ -29,6 +32,7 @@ export const registerAdbCommands = (
           { close: () => provider.close() },
           "adb",
           operation,
+          signal,
         ),
       ),
     );
@@ -342,6 +346,7 @@ export const registerAdbCommands = (
         .describe("Explicit component in package/activity form (-n)"),
       extra: z
         .array(z.string().min(1))
+        .max(MAX_ADB_ACTIVITY_EXTRAS)
         .default([])
         .describe(
           "Typed extra as type:key:value (string, boolean, int, long, float), repeatable",

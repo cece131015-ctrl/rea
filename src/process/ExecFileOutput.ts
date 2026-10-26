@@ -1,3 +1,4 @@
+import type { AnalysisCapturedOutput } from "../domain/analysisErrorBase.js";
 import {
   execFile,
   type ExecFileOptionsWithBufferEncoding,
@@ -10,10 +11,12 @@ type ExecFileOutputOptions = Omit<
   readonly maxBuffer?: number;
   /**
    * Signal that stops the process on abort or timeout. The promise then
-   * settles only after the process exits, so the caller can remove files it
-   * writes; a process still running after a grace period is killed. Without
-   * it, Node's execFile sends SIGTERM on abort and rejects before the
-   * process exits.
+   * settles only after that process's stdio pipes close, so a caller can
+   * remove files the command wrote. A descendant that inherited those pipes
+   * keeps them open until it exits; destroying the readers is not
+   * process-family completion and must not unblock this settlement. A process
+   * still running after a grace period is killed. Without this signal, Node's
+   * execFile sends SIGTERM on abort and rejects before the process exits.
    */
   readonly stopSignal?: NodeJS.Signals;
 };
@@ -120,6 +123,23 @@ export const execFileOutputFailure = (
     ...(collectionFailure === true ? { collectionFailure: true } : {}),
   };
 };
+
+/** Project admitted command failure facts without reinterpreting failure policy. */
+export const execFileFailureCapturedOutput = (
+  failure: ExecFileOutputFailure,
+): AnalysisCapturedOutput => ({
+  stdout: failure.stdout,
+  stderr: failure.stderr,
+  ...(failure.stdoutBytes === undefined
+    ? {}
+    : { stdout_bytes: failure.stdoutBytes }),
+  ...(failure.stderrBytes === undefined
+    ? {}
+    : { stderr_bytes: failure.stderrBytes }),
+  exit_code: typeof failure.code === "number" ? failure.code : null,
+  signal: failure.signal,
+  truncated: failure.outputTruncated,
+});
 
 /** Run a shell-free command while capturing its complete output bytes. */
 export const execFileBytes = (
