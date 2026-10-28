@@ -23,6 +23,8 @@ export interface HtmlAttributeValue {
   readonly valueRange: TextRange;
   /** The quote that delimits the value in source, or null when unquoted. */
   readonly quote: '"' | "'" | null;
+  /** The attribute is written without `=` and a value. */
+  readonly valueless: boolean;
 }
 
 /**
@@ -184,10 +186,11 @@ const attributeValueSpan = (
   text: string,
   start: number,
   end: number,
-): Pick<HtmlAttributeValue, "valueRange" | "quote"> => {
+): Pick<HtmlAttributeValue, "valueRange" | "quote" | "valueless"> => {
   const source = text.slice(start, end);
   const equals = source.indexOf("=");
-  if (equals < 0) return { valueRange: { start: end, end }, quote: null };
+  if (equals < 0)
+    return { valueRange: { start: end, end }, quote: null, valueless: true };
   let index = equals + 1;
   while (index < source.length && /[\t\n\f\r ]/u.test(source[index] ?? ""))
     index += 1;
@@ -200,8 +203,13 @@ const attributeValueSpan = (
           source.endsWith(quote) && source.length - 1 > index ? end - 1 : end,
       },
       quote,
+      valueless: false,
     };
-  return { valueRange: { start: start + index, end }, quote: null };
+  return {
+    valueRange: { start: start + index, end },
+    quote: null,
+    valueless: false,
+  };
 };
 
 /** The raw text span between a style element's tags. */

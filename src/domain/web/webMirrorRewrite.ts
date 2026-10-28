@@ -4,6 +4,7 @@ import { cssString, cssUrlReferences } from "./cssUrlReferences.js";
 import {
   htmlUrlReferences,
   srcsetCandidates,
+  type HtmlAttributeValue,
   type TextRange,
 } from "./htmlUrlReferences.js";
 
@@ -43,21 +44,32 @@ const trimAsciiWhitespace = (value: string): string =>
 const encodePath = (path: string): string =>
   path.split("/").map(encodeURIComponent).join("/");
 
+/** References a view keeps exactly because they stay where they point. */
+interface LocalReferences {
+  /** Empty references: the document, or no fetch at all for resources. */
+  readonly empty: boolean;
+  /** Fragment-only references within the current document. */
+  readonly fragment: boolean;
+}
+
 /**
  * Resolve one reference. Captured HTTP(S) URLs become paths relative to the
  * view file; uncaptured relative URLs become absolute so offline links never
- * silently point at missing local files. Non-HTTP and unparseable references
- * are left exactly as written, and so are empty and fragment-only references
- * that stay in the same document (`sameDocument`).
+ * silently point at missing local files. Non-HTTP, unparseable and already
+ * absolute uncaptured references are left exactly as written, and so are
+ * the empty and fragment-only references `local` keeps.
  */
 const resolveReference = (
   raw: string,
   base: URL,
   context: RewriteContext,
-  sameDocument: boolean,
+  local: LocalReferences,
 ): ReferenceOutcome => {
   const reference = trimAsciiWhitespace(raw);
-  if (sameDocument && (reference === "" || reference.startsWith("#")))
+  if (
+    (local.empty && reference === "") ||
+    (local.fragment && reference.startsWith("#"))
+  )
     return { kind: "unchanged" };
   let url: URL;
   try {
@@ -70,12 +82,11 @@ const resolveReference = (
   const fragment = url.hash;
   url.hash = "";
   const target = context.lookup(url.href);
-  if (target === undefined) {
-    const absolute = `${url.href}${fragment}`;
-    return absolute === reference
+  if (target === undefined)
+    // An absolute reference already works online; keep its spelling.
+    return URL.canParse(reference)
       ? { kind: "unchanged" }
-      : { kind: "absolute", value: absolute };
-  }
+      : { kind: "absolute", value: `${url.href}${fragment}` };
   const relative = posix.relative(posix.dirname(context.fromPath), target);
   return {
     kind: "local",
@@ -117,7 +128,10 @@ export const rewriteCss = (
   const edits: Edit[] = [];
   for (const reference of cssUrlReferences(text)) {
     // Fragment-only CSS URLs always refer to the current document.
-    const outcome = resolveReference(reference.url, base, context, true);
+    const outcome = resolveReference(reference.url, base, context, {
+      empty: true,
+      fragment: true,
+    });
     if (outcome.kind === "unchanged") continue;
     if (outcome.kind === "local") rewritten += 1;
     else unresolved += 1;
@@ -137,13 +151,23 @@ export const rewriteCss = (
   };
 };
 
-const encodeAttribute = (value: string, quote: '"' | "'" | null): string => {
-  const delimiter = quote ?? '"';
+const encodeAttribute = (
+  value: string,
+  attribute: Pick<HtmlAttributeValue, "quote" | "valueless">,
+): string => {
+  const delimiter = attribute.quote ?? '"';
   const escaped = value
     .replaceAll("&", "&amp;")
     .replaceAll(delimiter, delimiter === '"' ? "&quot;" : "&#39;");
-  return quote === null ? `"${escaped}"` : escaped;
+  if (attribute.valueless) return `="${escaped}"`;
+  return attribute.quote === null ? `"${escaped}"` : escaped;
 };
+
+// Only hyperlinks navigate on an empty value; an empty resource URL fetches
+// nothing, so it stays empty whatever the base.
+const isHyperlink = (reference: HtmlAttributeValue): boolean =>
+  (reference.element === "a" || reference.element === "area") &&
+  (reference.attribute === "href" || reference.attribute === "xlink:href");
 
 // Subresource integrity no longer matches a rewritten view, and file://
 // documents cannot satisfy CORS for crossorigin requests.
@@ -172,6 +196,8 @@ export const rewriteHtml = (
   // The view's base is its own file, so empty and fragment-only references
   // keep their meaning only when the original base was the document itself.
   const sameDocument = withoutFragment(base) === withoutFragment(documentUrl);
+  const hyperlinkLocal = { empty: sameDocument, fragment: sameDocument };
+  const resourceLocal = { empty: true, fragment: sameDocument };
   let rewritten = 0;
   let unresolved = 0;
   const edits: Edit[] = [];
@@ -187,7 +213,7 @@ export const rewriteHtml = (
           ...reference.valueRange,
           replacement: encodeAttribute(
             encodePath(posix.basename(context.fromPath)),
-            reference.quote,
+            reference,
           ),
         });
       continue;
@@ -207,7 +233,7 @@ export const rewriteHtml = (
       if (css.text !== reference.value)
         edits.push({
           ...reference.valueRange,
-          replacement: encodeAttribute(css.text, reference.quote),
+          replacement: encodeAttribute(css.text, reference),
         });
       continue;
     }
@@ -221,7 +247,7 @@ export const rewriteHtml = (
           candidate.url,
           base,
           context,
-          sameDocument,
+          resourceLocal,
         );
         count(outcome);
         if (outcome.kind === "unchanged") continue;
@@ -237,7 +263,7 @@ export const rewriteHtml = (
         reference.value,
         base,
         context,
-        sameDocument,
+        isHyperlink(reference) ? hyperlinkLocal : resourceLocal,
       );
       count(outcome);
       if (outcome.kind !== "unchanged") value = outcome.value;
@@ -246,7 +272,7 @@ export const rewriteHtml = (
     if (value === reference.value) continue;
     edits.push({
       ...reference.valueRange,
-      replacement: encodeAttribute(value, reference.quote),
+      replacement: encodeAttribute(value, reference),
     });
     if (!local) continue;
     for (const name of LOCAL_INCOMPATIBLE_ATTRIBUTES) {

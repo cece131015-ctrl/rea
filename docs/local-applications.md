@@ -27,9 +27,10 @@ third-party package mirrors are out of scope.
 entry is an absolute directory (the CLI resolves relative ones against its
 working directory) that may hold app bundles, desktop entries, AppImages or
 program directories.
-Every searched location is reported as `scanned`, `missing`, `unreadable` or
-`truncated` (more than 10,000 entries), and coverage is `partial` when a location
-could not be read completely. Windows registry entries, Start Menu shortcuts and
+Every searched location is reported as `scanned`, `missing`, `unreadable`,
+`truncated` (more than 10,000 entries) or `partial` (a subdirectory of desktop
+entries could not be read; the rest was searched), and coverage is `partial` when
+a location could not be read completely. Windows registry entries, Start Menu shortcuts and
 Store (MSIX/AppX) packages are not read.
 
 ## Names and matches
@@ -47,10 +48,15 @@ Info.plist files are decoded by REA's existing in-process decoder (binary or
 XML); desktop entries follow the freedesktop Desktop Entry specification,
 including escapes, `Exec` quoting and field codes. A desktop entry's program is
 `TryExec` or the first `Exec` argument (after an `env` wrapper), found on `PATH`
-and resolved through symbolic links. Its installed files are the package
-directory below a known install location (for example `/usr/lib/libreoffice`
-for `/usr/lib/libreoffice/program/soffice`), the flatpak or snap install, or the
-program's own directory. A program that lives directly in a shared command
+(`/usr/bin:/bin` when `PATH` is unset) and resolved through symbolic links. When
+`Exec` starts with an interpreter or runtime (`sh`, `python3`, `java`, `node` and
+similar), the first absolute file argument (the script or jar) is the program
+instead, with a limitation; an inline command such as `sh -c "..."` names no
+installed file. Its installed files are the program's own directory below a known
+install location, or its parent while that directory is a generic program
+directory such as `bin` or `program` (for example `/usr/lib/libreoffice` for
+`/usr/lib/libreoffice/program/soffice`, and `/opt/google/chrome`, not the vendor
+directory `/opt/google`), or the flatpak or snap install. A program that lives directly in a shared command
 directory such as `/usr/bin` is selected as a single file, with a limitation:
 libraries and data it loads from elsewhere are not included. Electron
 `app.asar` archives at the usual bundle locations are reported.
@@ -61,7 +67,9 @@ libraries and data it loads from elsewhere are not included. Electron
 a name. The CLI treats an argument with a path separator, `.` or `..` as a path
 and anything else, including dot-prefixed names such as `.NET`, as a name. A name must select exactly one application: a single exact match, or a
 single match. Otherwise the call fails without writing and lists up to 20
-candidates; pass one candidate's path instead.
+candidates; pass one candidate's path instead. When a searched location was not
+read completely, a name selection still proceeds but states that its uniqueness
+is unverified.
 
 Directories are copied by the artifact extraction owner: regular files only,
 symbolic links are neither followed nor recreated (their count is stated),

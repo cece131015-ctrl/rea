@@ -2,11 +2,10 @@ import { javascriptSourceRangeKey } from "../../domain/javascript/javascriptSour
 import type { ApplicationNode } from "../../domain/javascript/javascriptApplicationGraphSchemas.js";
 import type { ElectronCallPath } from "../../domain/javascript/electronStaticAnalysisTypes.js";
 import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
-import { sha256Text } from "../../domain/javascript/javascriptStaticAnalysisHelpers.js";
-import {
-  collectElectronIpcRecords,
-  unambiguousElectronIpcPairings,
-  type ElectronIpcRecord,
+import { electronCallPathId } from "./ElectronCallPathIdentity.js";
+import type {
+  ElectronIpcContext,
+  ElectronIpcRecord,
 } from "./ElectronBoundaryAnalysis.js";
 import {
   addElectronInferenceEdge,
@@ -30,13 +29,14 @@ interface ProjectedPath {
 /** Retain context-specific wrapper paths, then join only unique IPC records. */
 export const addElectronCallPaths = (
   context: JavaScriptArtifactGraphContext,
+  ipc: ElectronIpcContext,
 ): void => {
   const projected: ProjectedPath[] = [];
   for (const { file, javascript } of context.analysis.files) {
     if (javascript === null) continue;
     const coverage = javascriptAnalysisCoverage(javascript);
     for (const path of javascript.electron.call_paths ?? []) {
-      const pathId = sha256Text(JSON.stringify(path));
+      const pathId = electronCallPathId(file.path, path);
       const nodes = path.steps.map((step, index) =>
         context.accumulator.addNode({
           kind: "javascript-expression",
@@ -137,9 +137,7 @@ export const addElectronCallPaths = (
       projected.push({ file, path, coverage, nodes });
     }
   }
-  for (const { transmission, handler } of unambiguousElectronIpcPairings(
-    collectElectronIpcRecords(context.analysis),
-  )) {
+  for (const { transmission, handler } of ipc.pairings) {
     const sources = projected.filter(
       (p) => p.path.entry_kind === "bridge-member" && matches(p, transmission),
     );

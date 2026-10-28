@@ -7,12 +7,12 @@ import {
   parseDocument,
   Document,
   Schema,
-  visit,
   type ParsedNode,
   type Node,
   type ScalarTag,
   type Tags,
 } from "yaml";
+import { preserveHermesAliasValues } from "./HermesConfigurationAliases.js";
 
 const SOURCE_SCALAR_TAGS = new Set([
   "tag:yaml.org,2002:int",
@@ -395,33 +395,6 @@ const copyHermesAliasSource = (
   return copied;
 };
 
-/** External aliases keep their original bindings when their source is replaced. */
-const retainHermesAliasConsumers = (
-  document: Document,
-  previous: unknown,
-): void => {
-  if (!isNode(previous)) return;
-  const replaced = new Set<Node>();
-  visit(previous, {
-    Node: (_key, node) => {
-      replaced.add(node);
-    },
-  });
-  visit(document, {
-    Alias: (_key, alias, path) => {
-      const source = alias.resolve(document);
-      if (
-        source === undefined ||
-        !replaced.has(source) ||
-        path.some((parent) => isNode(parent) && replaced.has(parent))
-      )
-        return;
-      const copied = copyHermesAliasSource(alias, document);
-      return isNode(copied) ? copied : undefined;
-    },
-  });
-};
-
 /** Set or delete one value in a Hermes `config.yaml`, keeping the rest as written. */
 export const editHermesConfigurationYaml = (
   text: string,
@@ -453,11 +426,19 @@ export const editHermesConfigurationYaml = (
       document.setIn(parent, document.createNode({}));
     }
   }
-  retainHermesAliasConsumers(document, document.getIn(path, true));
+  const previous = document.getIn(path, true);
+  // Deletion removes the pair's key too; replacement retains that key node.
+  const parent =
+    value === undefined ? document.getIn(path.slice(0, -1), true) : undefined;
+  const removedKey = isMap(parent)
+    ? parent.items.find(
+        (pair) => isScalar(pair.key) && pair.key.value === path.at(-1),
+      )?.key
+    : undefined;
+  preserveHermesAliasValues(document, [previous, removedKey]);
   if (value === undefined) {
     if (!document.deleteIn(path)) return text;
   } else {
-    const previous = document.getIn(path, true);
     // Let YAML's scalar update preserve numeric formats for a direct edit.
     // Replacing containers needs explicit retention of unchanged child nodes.
     document.setIn(

@@ -93,17 +93,24 @@ export const digestProcessCommitment = (value: unknown): string => {
   return createHash("sha256").update(serialized).digest("hex");
 };
 
+/** Explicit private-input facts contain no textual marker that can collide with a value. */
+export const sensitiveProcessInputProjection = (data: string) => ({
+  data: "",
+  sensitive: true as const,
+  input_bytes: Buffer.byteLength(data),
+});
+
 const committedScenarioEvents = (
   events: ProcessScenario["events"],
   includeSensitiveInputLength: boolean,
-): ProcessScenario["events"] =>
+) =>
   events.map((event) =>
     event.type === "input" && event.sensitive
       ? {
           ...event,
-          data: includeSensitiveInputLength
-            ? `<redacted-input:${String(Buffer.byteLength(event.data))}-bytes>`
-            : "<redacted-input>",
+          ...(includeSensitiveInputLength
+            ? sensitiveProcessInputProjection(event.data)
+            : { data: "" }),
         }
       : event,
   );
@@ -146,6 +153,9 @@ export const processComparisonContract = (
   limits: scenario.limits,
   normalization: scenario.normalization,
   terminal_observation_version: "deferred-rendered-journal-v1",
+  ...(scenario.events.some((event) => event.type === "input" && event.sensitive)
+    ? { sensitive_input_redaction_version: "literal-terminal-input-v1" }
+    : {}),
   ...(scenario.normalization.pids
     ? { pid_normalization_version: "sampled-identifiers-v2" }
     : {}),

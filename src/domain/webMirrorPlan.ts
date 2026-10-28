@@ -1,4 +1,4 @@
-import { mediaTypeEssence } from "./mediaType.js";
+import { mediaTypeEssence } from "./analysisView/recordedMediaType.js";
 import {
   conflictingPaths,
   isPortablePathSegment,

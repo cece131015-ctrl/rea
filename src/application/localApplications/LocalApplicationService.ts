@@ -152,10 +152,7 @@ export const cloneLocalApplicationValidated = async (
     );
   const roots = searchRootsError(CLONE_OPERATION, input.search_roots);
   if (roots !== undefined) return err(roots);
-  let selected: Result<
-    { readonly application: LocalApplication; readonly considered: number },
-    AnalysisError
-  >;
+  let selected: Result<SelectedApplication, AnalysisError>;
   try {
     selected = await selectApplication(
       input,
@@ -166,7 +163,7 @@ export const cloneLocalApplicationValidated = async (
     return err(unexpectedFailure(CLONE_OPERATION, options.signal, cause));
   }
   if (!selected.ok) return selected;
-  const { application, considered } = selected.value;
+  const { application, considered, uniqueness } = selected.value;
   if (application.root_path === null || application.root_kind === null)
     return err(
       inputError(
@@ -224,6 +221,7 @@ export const cloneLocalApplicationValidated = async (
     analysis_inputs: analysisInputs,
     limitations: [
       ...application.limitations,
+      ...(uniqueness === undefined ? [] : [uniqueness]),
       ...facts.limitations,
       "The copy reproduces the installed files only; it does not install, register or run the application, and settings, caches or data stored elsewhere are not included.",
     ],
@@ -286,17 +284,19 @@ const inputError = (
     { path: [...path], reason: "invalid_value", message },
   ]);
 
+interface SelectedApplication {
+  readonly application: LocalApplication;
+  readonly considered: number;
+  /** Why a name's uniqueness could not be established, when it could not. */
+  readonly uniqueness?: string;
+}
+
 /** Resolve the caller's selection to exactly one application. */
 const selectApplication = async (
   input: CloneLocalApplicationInput,
   host: LocalApplicationHost,
   signal: AbortSignal | undefined,
-): Promise<
-  Result<
-    { readonly application: LocalApplication; readonly considered: number },
-    AnalysisError
-  >
-> => {
+): Promise<Result<SelectedApplication, AnalysisError>> => {
   if (isAbsolute(input.application)) {
     const candidate = await classifyApplicationPath(input.application, host);
     if (candidate === undefined)
@@ -307,7 +307,7 @@ const selectApplication = async (
           `No application bundle, directory, desktop entry or regular file exists at ${input.application}.`,
         ),
       );
-    const { names: _names, ...application } = candidate;
+    const { names: _names, hidden: _hidden, ...application } = candidate;
     return ok({
       application: { ...application, matched_field: "path", exact: true },
       considered: 1,
@@ -335,13 +335,22 @@ const selectApplication = async (
         ? discovery.matches[0]
         : undefined;
   if (choice !== undefined)
-    return ok({ application: choice, considered: discovery.matches.length });
+    return ok({
+      application: choice,
+      considered: discovery.matches.length,
+      // A location read only partly may hold another application of this name.
+      ...(discovery.coverage.status === "partial"
+        ? {
+            uniqueness: `The name selected one application only among the locations read; ${discovery.coverage.reasons.join("; ")}. Another application with this name may be installed there; pass an absolute path to select it exactly.`,
+          }
+        : {}),
+    });
   if (discovery.matches.length === 0)
     return err(
       inputError(
         CLONE_OPERATION,
         ["application"],
-        `No installed application matches "${input.application}" in ${discovery.roots.filter(({ state }) => state === "scanned" || state === "truncated").length} searched location(s). Use find_local_applications to inspect the search, or pass the application's absolute path.`,
+        `No installed application matches "${input.application}" in ${discovery.roots.filter(({ state }) => state !== "missing" && state !== "unreadable").length} searched location(s). Use find_local_applications to inspect the search, or pass the application's absolute path.`,
       ),
     );
   const pool = exact.length > 1 ? exact : discovery.matches;
@@ -351,12 +360,15 @@ const selectApplication = async (
       ({ name, kind, root_path, source_path }) =>
         `${name} [${kind}] ${root_path ?? source_path}`,
     );
-  const omitted = pool.length + discovery.matches_omitted - listed.length;
+  // Exact matches sort first, so an exact pool is never among the omitted.
+  const total =
+    exact.length > 1 ? exact.length : pool.length + discovery.matches_omitted;
+  const omitted = total - listed.length;
   return err(
     inputError(
       CLONE_OPERATION,
       ["application"],
-      `"${input.application}" matches ${pool.length + (exact.length > 1 ? 0 : discovery.matches_omitted)} applications; pass one absolute path instead: ${listed.join("; ")}${omitted > 0 ? `; and ${omitted} more` : ""}.`,
+      `"${input.application}" matches ${total} ${exact.length > 1 ? "applications exactly" : "applications"}; pass one absolute path instead: ${listed.join("; ")}${omitted > 0 ? `; and ${omitted} more` : ""}.`,
     ),
   );
 };

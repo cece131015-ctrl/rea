@@ -530,6 +530,7 @@ it("rejects an oversized OBJECT IDENTIFIER before growing an arc", () => {
     /OBJECT IDENTIFIER exceeds/u,
   );
   const arc = Buffer.alloc(MAX_OID_ARC_BYTES + 1, 0x80);
+  arc[0] = 0x81;
   arc[arc.length - 1] = 0x00;
   expect(() => decodeOid(Buffer.concat([Buffer.from([0x2a]), arc]))).toThrow(
     /arc exceeds/u,

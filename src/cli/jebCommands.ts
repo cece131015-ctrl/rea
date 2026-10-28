@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { JebAnalysisService } from "../application/jeb/JebAnalysisService.js";
 import type { JebAnalysisPort } from "../application/jeb/JebAnalysisPort.js";
@@ -28,7 +29,7 @@ export const registerJebCommands = (
           "jeb",
           operation,
           signal,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
     );
 

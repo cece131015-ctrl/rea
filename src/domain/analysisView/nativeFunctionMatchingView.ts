@@ -1,7 +1,6 @@
 import { z } from "zod";
 import {
   nativeFunctionMatchingSchema,
-  nativeFunctionMatchingContextSchema,
   nativeFunctionMatchSchema,
   nativeFunctionMatchMemberSchema,
   nativeMatchStateSchema,
@@ -80,8 +79,6 @@ export const nativeFunctionMatchingViewItemsSchema = z.union([
     }),
   ),
 ]);
-export const nativeFunctionMatchingViewContextSchema =
-  nativeFunctionMatchingContextSchema;
 interface FunctionRow {
   readonly member: NativeFunctionMatching["matches"][number]["left"][number];
   readonly match_id: string;

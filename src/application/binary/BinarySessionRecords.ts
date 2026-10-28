@@ -21,6 +21,7 @@ import type {
   UpdateUnknownInput,
 } from "../../domain/residualUnknown.js";
 import type {
+  EvidenceImportReceipt,
   UnknownPage,
   UnknownQuery,
 } from "../investigation/InvestigationRecordPort.js";
@@ -167,12 +168,19 @@ export abstract class BinarySessionRecords {
 
   importEvidenceBundle(
     bundle: unknown,
-  ): Result<number, EvidenceIntegrityError | AnalysisInputError> {
+  ): Result<
+    EvidenceImportReceipt,
+    EvidenceIntegrityError | AnalysisInputError
+  > {
     const imported = this.#records.mergeEvidenceBundle(bundle);
     if (!imported.ok) return imported;
     this.#snapshot.refreshEvidenceMetadata(imported.value.replacements);
     if (imported.value.changed) this.#emitSnapshotChanged();
-    return ok(imported.value.recordsAdded);
+    return ok({
+      recordsAdded: imported.value.recordsAdded,
+      unknownsAdded: imported.value.unknownsAdded,
+      totalRecords: this.#records.immutableEvidenceBundle().records.length,
+    });
   }
 
   protected abstract activeAnalysisBinding(): ActiveAnalysisBinding | undefined;

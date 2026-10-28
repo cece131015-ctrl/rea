@@ -401,6 +401,52 @@ describe("browser scenario network event order", () => {
     expect(compare(redirectChainCapture(true)).overall_status).toBe("changed");
   });
 
+  it("keeps duplicate request identities incomparable without dropping occurrences", () => {
+    const capture = concurrentCapture(["a", "b"], { a: 200, b: 404 });
+    const request = capture.events.items.find(
+      (event) => event.kind === "request",
+    );
+    if (request === undefined) throw new Error("Expected request fixture");
+    const ambiguous = browserScenarioCaptureSchema.parse({
+      ...capture,
+      events: {
+        ...capture.events,
+        retained: capture.events.retained + 1,
+        items: [
+          ...capture.events.items,
+          { ...request, sequence: capture.events.retained + 1, step_index: 1 },
+        ],
+      },
+    });
+    for (const [before_scenario, after_scenario] of [
+      [ambiguous, ambiguous],
+      [ambiguous, capture],
+      [capture, ambiguous],
+    ] as const) {
+      const input = compareBrowserScenariosInputSchema.parse({
+        before_scenario,
+        after_scenario,
+      });
+      const compared = compareBrowserScenarios(input);
+      expect(compared.overall_status).toBe("unknown");
+      expect(
+        compared.steps.flatMap((step) => step.artifact_diffs),
+      ).toContainEqual(
+        expect.objectContaining({
+          artifact: "events",
+          status: "unknown",
+          reason: expect.stringContaining("Multiple requests share"),
+        }),
+      );
+      expect(input.before_scenario.events.items).toEqual(
+        before_scenario.events.items,
+      );
+      expect(input.after_scenario.events.items).toEqual(
+        after_scenario.events.items,
+      );
+    }
+  });
+
   it("keeps missing and cyclic redirect ancestry incomparable", () => {
     for (const predecessor of ["missing", "middle-a", null]) {
       const capture = redirectChainCapture();

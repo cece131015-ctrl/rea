@@ -37,6 +37,7 @@ import {
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
 import { analysisViewResultInputError } from "./analysisViewParent.js";
+import { ARTIFACT_INVENTORY_VIEW_CAVEATS } from "./artifactInventoryViewCaveats.js";
 
 const page = {
   kind: z.literal("inventory"),
@@ -264,8 +265,12 @@ export const projectArtifactInventoryView = (
   const includeHashCounts =
     view.kind === "inventory" ||
     inventory.manifest.root_format === "godot-pck" ||
+    inventory.manifest.root_format === "unityfs" ||
     inventory.manifest.root_format === "pyinstaller" ||
-    inventory.manifest.root_format === "node-sea";
+    inventory.manifest.root_format === "node-sea" ||
+    inventory.manifest.root_format === "intel-hex" ||
+    inventory.manifest.root_format === "srec" ||
+    inventory.manifest.root_format === "esp-image";
   const counts = inventoryCounts(source);
   const limitations = uniqueSorted([
     ...parent.limitations,
@@ -284,14 +289,10 @@ export const projectArtifactInventoryView = (
     unknowns: [
       "Inventory does not establish application runtime behavior or complete format-specific analysis.",
       ...(inventory.coverage.status === "unknown"
-        ? [
-            "Producer traversal coverage is unknown; missing matches do not prove source absence.",
-          ]
+        ? [ARTIFACT_INVENTORY_VIEW_CAVEATS.unknownTraversal]
         : []),
       ...(counts.hashes.unavailable > 0 || counts.hashes["not-hashed"] > 0
-        ? [
-            "Content hashes are unknown for some recorded files; missing node IDs do not prove content absence.",
-          ]
+        ? [ARTIFACT_INVENTORY_VIEW_CAVEATS.unknownContentHashes]
         : []),
       ...(inventory.complete
         ? []

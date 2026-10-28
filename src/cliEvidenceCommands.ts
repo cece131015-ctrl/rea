@@ -1,3 +1,4 @@
+import { withCommandCancellation } from "./cli/commandCancellation.js";
 import { safeParseJson } from "./domain/safeJson.js";
 import { AnalysisInputError } from "./domain/analysisErrorCore.js";
 import { analysisInputErrorFromIssues } from "./domain/inputIssueProjection.js";
@@ -27,10 +28,12 @@ export const registerEvidenceCommands = (
       path: z.string().describe("Evidence bundle JSON path"),
     }),
     run: ({ args }) =>
-      logCliCommand(logger, "evidence-import", async () => {
-        const imported = await importEvidenceBundleCommand(args.path);
-        return imported.ok ? imported.value : cliError(imported.error);
-      }),
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "evidence-import", async () => {
+          const imported = await importEvidenceBundleCommand(args.path, signal);
+          return imported.ok ? imported.value : cliError(imported.error);
+        }),
+      ),
   });
   cli.command(CLI_COMMANDS.evidenceExport, {
     description: "Validate and atomically export canonical Evidence JSON",
@@ -42,17 +45,19 @@ export const registerEvidenceCommands = (
       overwrite: z.boolean().default(false).describe("Replace output file"),
     }),
     run: ({ args, options }) =>
-      logCliCommand(logger, "evidence-export", async () => {
-        const exported = await exportEvidenceBundleCommand(
-          args.source,
-          args.output,
-          options.overwrite,
-        );
-        return exported.ok ? exported.value : cliError(exported.error);
-      }),
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "evidence-export", async () => {
+          const exported = await exportEvidenceBundleCommand(
+            args.source,
+            args.output,
+            options.overwrite,
+            signal,
+          );
+          return exported.ok ? exported.value : cliError(exported.error);
+        }),
+      ),
   });
   cli.command(CLI_COMMANDS.compare, {
-    aliases: ["compare-bundles"],
     description: "Compare two canonical Evidence bundles",
     args: z.object({
       left: z.string().describe("Left Evidence bundle JSON path"),
@@ -67,44 +72,47 @@ export const registerEvidenceCommands = (
         ),
     }),
     run: ({ args, options }) =>
-      logCliCommand(logger, "compare", async () => {
-        const decoded =
-          options.record_pairs === undefined
-            ? { ok: true as const, value: [] }
-            : safeParseJson(options.record_pairs);
-        if (!decoded.ok)
-          return cliError(
-            new AnalysisInputError(
-              "compare_bundles",
-              { cause: decoded.cause },
-              [
-                {
-                  path: ["record_pairs"],
-                  reason: "invalid_format",
-                  expected: "JSON array",
-                },
-              ],
-            ),
-          );
-        const input = { record_pairs: decoded.value };
-        const selected = bundleComparisonInputSchema
-          .pick({ record_pairs: true })
-          .safeParse(input);
-        if (!selected.success)
-          return cliError(
-            analysisInputErrorFromIssues(
-              "compare_bundles",
-              selected.error.issues,
-              input,
-            ),
-          );
-        const compared = await compareEvidenceBundlesCommand({
-          leftPath: args.left,
-          rightPath: args.right,
-          recordPairs: selected.data.record_pairs,
-        });
-        return compared.ok ? compared.value : cliError(compared.error);
-      }),
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "compare", async () => {
+          const decoded =
+            options.record_pairs === undefined
+              ? { ok: true as const, value: [] }
+              : safeParseJson(options.record_pairs);
+          if (!decoded.ok)
+            return cliError(
+              new AnalysisInputError(
+                "compare_bundles",
+                { cause: decoded.cause },
+                [
+                  {
+                    path: ["record_pairs"],
+                    reason: "invalid_format",
+                    expected: "JSON array",
+                  },
+                ],
+              ),
+            );
+          const input = { record_pairs: decoded.value };
+          const selected = bundleComparisonInputSchema
+            .pick({ record_pairs: true })
+            .safeParse(input);
+          if (!selected.success)
+            return cliError(
+              analysisInputErrorFromIssues(
+                "compare_bundles",
+                selected.error.issues,
+                input,
+              ),
+            );
+          const compared = await compareEvidenceBundlesCommand({
+            leftPath: args.left,
+            rightPath: args.right,
+            recordPairs: selected.data.record_pairs,
+            signal,
+          });
+          return compared.ok ? compared.value : cliError(compared.error);
+        }),
+      ),
   });
 };
 

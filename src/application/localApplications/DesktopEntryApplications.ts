@@ -53,11 +53,18 @@ const installContainers = (host: LocalApplicationHost): readonly string[] => [
 // Shared namespaces inside a container hold many packages, so one more
 // segment names the package (for example /usr/lib/jvm/<runtime>).
 const SHARED_NAMESPACE = /^(?:[A-Za-z0-9_]+-linux-gnu[A-Za-z0-9_]*|jvm)$/u;
+// Directories that hold a package's programs rather than name the package.
+const PROGRAM_DIRECTORY =
+  /^(?:bin|sbin|program|programs|libexec|x86_64|x64|amd64|arm64|aarch64)$/iu;
 
 /**
- * The package directory that contains a resolved program: the first segment
- * below a known install container. Anywhere else the directory around the
- * program may hold unrelated software, so only the program file is selected.
+ * The package directory that contains a resolved program, below a known
+ * install container: the program's own directory, or its parent while that
+ * directory is a generic program directory such as `bin` or `program`. A
+ * vendor directory (for example /opt/google) may hold several products, so
+ * it is never selected for a program in one of its subdirectories. Anywhere
+ * else the directory around the program may hold unrelated software, so only
+ * the program file is selected.
  */
 const installRoot = (
   program: string,
@@ -71,10 +78,13 @@ const installRoot = (
     const depth = SHARED_NAMESPACE.test(segments[0] ?? "") ? 2 : 1;
     // A program directly in the container (or namespace) has no package root.
     if (segments.length <= depth) return { path: program, kind: "file" };
-    return {
-      path: join(container, ...segments.slice(0, depth)),
-      kind: "directory",
-    };
+    const directory = segments.slice(0, -1);
+    while (
+      directory.length > depth &&
+      PROGRAM_DIRECTORY.test(directory.at(-1) ?? "")
+    )
+      directory.pop();
+    return { path: join(container, ...directory), kind: "directory" };
   }
   return { path: program, kind: "file" };
 };
@@ -88,6 +98,16 @@ const isExecutableFile = async (path: string): Promise<boolean> => {
   }
 };
 
+const isRegularFile = async (path: string): Promise<boolean> => {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+};
+
+// A desktop session looks Exec programs up in PATH; without one, use the
+// same default search path as Node and process capture.
 const resolveCommand = async (
   command: string,
   host: LocalApplicationHost,
@@ -96,7 +116,9 @@ const resolveCommand = async (
     return isAbsolute(command) && (await isExecutableFile(command))
       ? command
       : undefined;
-  for (const directory of (host.environment.PATH ?? "").split(delimiter)) {
+  for (const directory of (host.environment.PATH ?? "/usr/bin:/bin").split(
+    delimiter,
+  )) {
     if (!isAbsolute(directory)) continue;
     const path = join(directory, command);
     if (await isExecutableFile(path)) return path;
@@ -104,9 +126,22 @@ const resolveCommand = async (
   return undefined;
 };
 
-/** The program a desktop entry launches, skipping a leading `env` wrapper. */
-const launchedCommand = (entry: DesktopEntry): string | undefined => {
-  if (entry.tryExec !== null && entry.tryExec !== "") return entry.tryExec;
+// Interpreters and runtimes whose installed application is a file argument.
+const INTERPRETER =
+  /^(?:sh|bash|dash|zsh|ksh|python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node|nodejs|java|mono|wine|wine64|gjs|lua[0-9.]*|php[0-9.]*)$/u;
+
+/** What a desktop entry launches, skipping a leading `env` wrapper. */
+type LaunchedProgram =
+  | { readonly kind: "program"; readonly command: string }
+  | {
+      readonly kind: "script";
+      readonly interpreter: string;
+      readonly path: string;
+    }
+  | { readonly kind: "inline"; readonly interpreter: string }
+  | { readonly kind: "none" };
+
+const launchedProgram = (entry: DesktopEntry): LaunchedProgram => {
   const argv = entry.exec ?? [];
   let index = 0;
   if (basename(argv[0] ?? "") === "env") {
@@ -117,7 +152,22 @@ const launchedCommand = (entry: DesktopEntry): string | undefined => {
     )
       index += 1;
   }
-  return argv[index];
+  const command = argv[index];
+  if (command !== undefined && INTERPRETER.test(basename(command))) {
+    // The first absolute file argument is the application (a script or jar);
+    // an inline command (`sh -c "..."`) names no installed file.
+    const file = argv
+      .slice(index + 1)
+      .find((argument) => !argument.startsWith("-") && isAbsolute(argument));
+    return file === undefined
+      ? { kind: "inline", interpreter: command }
+      : { kind: "script", interpreter: command, path: file };
+  }
+  if (entry.tryExec !== null && entry.tryExec !== "")
+    return { kind: "program", command: entry.tryExec };
+  return command === undefined
+    ? { kind: "none" }
+    : { kind: "program", command };
 };
 
 /** Installed files behind a flatpak or snap launcher, when present on disk. */
@@ -161,9 +211,23 @@ export const desktopEntryCandidate = async (
   if (entry.hidden) limitations.push("The desktop entry is marked Hidden.");
   if (entry.noDisplay)
     limitations.push("The desktop entry is marked NoDisplay.");
-  const command = launchedCommand(entry);
+  const launched = launchedProgram(entry);
+  const command =
+    launched.kind === "program"
+      ? launched.command
+      : launched.kind === "script"
+        ? launched.path
+        : undefined;
   const executable =
-    command === undefined ? undefined : await resolveCommand(command, host);
+    launched.kind === "program"
+      ? await resolveCommand(launched.command, host)
+      : launched.kind === "script" && (await isRegularFile(launched.path))
+        ? launched.path
+        : undefined;
+  if (launched.kind === "script" && executable !== undefined)
+    limitations.push(
+      `The desktop entry runs ${basename(launched.interpreter)} on ${launched.path}; that file's install is selected, not the interpreter.`,
+    );
   const resolved =
     executable === undefined
       ? undefined
@@ -190,9 +254,11 @@ export const desktopEntryCandidate = async (
       );
   } else
     limitations.push(
-      command === undefined
-        ? "The desktop entry declares no program to launch."
-        : `The launched program ${command} was not found as an executable file.`,
+      launched.kind === "inline"
+        ? `The desktop entry runs an inline ${basename(launched.interpreter)} command that names no installed program file.`
+        : command === undefined
+          ? "The desktop entry declares no program to launch."
+          : `The launched program ${command} was not found as an executable file.`,
     );
   const stem = basename(path).slice(0, -".desktop".length);
   return {
@@ -201,6 +267,7 @@ export const desktopEntryCandidate = async (
     bundle_identifier: entry.keys.get("X-Flatpak") ?? null,
     version: null,
     kind: "desktop-entry",
+    hidden: entry.hidden || entry.noDisplay,
     root_path: rootPath,
     root_kind: rootKind,
     executable_path: resolved ?? null,

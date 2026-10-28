@@ -60,6 +60,24 @@ describe("rewriteHtml", () => {
     });
   });
 
+  it("writes a value for valueless hyperlinks and keeps empty resource URLs empty", () => {
+    const html = `<base href="https://cdn.example/"><img src><a href>x</a><img src="">`;
+    expect(rewriteHtml(html, documentUrl, { fromPath, lookup })).toMatchObject({
+      text: `<base href="index.html"><img src><a href="https://cdn.example/">x</a><img src="">`,
+      unresolved: 1,
+    });
+  });
+
+  it("keeps the spelling of absolute references that were not captured", () => {
+    const html = `<link rel="preconnect" href="https://Fonts.example"><a href="https://cdn.example">c</a>`;
+    expect(rewriteHtml(html, documentUrl, { fromPath, lookup })).toEqual({
+      text: html,
+      rewritten: 0,
+      unresolved: 0,
+      removedAttributes: 0,
+    });
+  });
+
   it("rewrites srcset candidates, style attributes and style elements", () => {
     const html = `<img srcset="/img/logo.png 1x, /img/big.png 2x"><p style="background:url(&quot;/img/logo.png&quot;)"></p><style>p{background:url(/img/logo.png)}</style>`;
     const rewritten = rewriteHtml(html, documentUrl, { fromPath, lookup });

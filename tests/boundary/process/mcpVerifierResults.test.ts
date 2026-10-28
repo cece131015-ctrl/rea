@@ -1,6 +1,20 @@
+import { ARTIFACT_COMPARISON_EXAMPLE } from "../../../src/contracts/artifactComparisonExample.js";
+import { artifactInventoryResultSchema } from "../../../src/domain/artifactGraph.js";
+import { digestCanonicalValue } from "../../../src/domain/canonicalDigest.js";
+import { createAnalysisExecutionEvidence } from "../../../src/domain/analysisObservation.js";
+import {
+  wasmArtifactFixture,
+  wasmArtifactExecution,
+} from "../../fixtures/wasm/artifact.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+import { parse } from "@babel/parser";
 import type { ToolContract } from "../../../src/contracts/toolContractTypes.js";
-import { createEvidence } from "../../../src/domain/evidence.js";
+import { createAnalysisProfile } from "../../../src/domain/analysisProfile.js";
+import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
+import { SUPPORTED_GHIDRA_VERSION } from "../../../src/ghidra/GhidraReleasePolicy.js";
 import {
   createEvidenceBundle,
   type EvidenceBundle,
@@ -8,6 +22,10 @@ import {
 import { expect, it } from "vitest";
 
 interface VerifierResults {
+  readonly requireMcpOperationResult: (
+    result: unknown,
+    operation: string,
+  ) => unknown;
   readonly requireMcpOutput: (
     result: unknown,
     operation: string,
@@ -207,6 +225,37 @@ const namedEvidence = () =>
       rawResult: { engine_name: "entry", source: "symbol table" },
     },
   );
+const ghidraEvidence = () => {
+  const provider = {
+    id: "ghidra",
+    name: "Ghidra",
+    version: SUPPORTED_GHIDRA_VERSION,
+  };
+  return createEvidence(
+    {
+      path: "/fixture/ghidra-image.elf",
+      sha256: "b".repeat(64),
+      format: "elf",
+      architecture: "x86_64",
+    },
+    provider,
+    {
+      operation: "address_name",
+      parameters: { address: "0x401000" },
+      result: "entry",
+      rawResult: {
+        address: "00401000",
+        symbol: "entry",
+        source: "Ghidra symbol table",
+      },
+      analysisProfile: createAnalysisProfile(provider, {
+        loader: "ElfLoader",
+        language_id: "x86:LE:64:default",
+        compiler_spec_id: "gcc",
+      }),
+    },
+  );
+};
 const textReply = (value: unknown) => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
 });
@@ -241,6 +290,66 @@ it("admits matching complete text and structured Evidence and rejects either mal
     ).toThrow();
 });
 
+it.each([false, true])(
+  "keeps Ghidra contract admission separate from Evidence authentication (structured=%s)",
+  async (structured) => {
+    const { requireMcpOutput } = await verifierResults();
+    const evidence = ghidraEvidence();
+    const reply = (value: unknown) => ({
+      ...textReply(value),
+      ...(structured ? { structuredContent: value } : {}),
+    });
+    const admitted = requireMcpOutput(reply(evidence), "address_name");
+    expect(admitted).toEqual(evidence);
+    const authenticated = parseEvidence(admitted);
+    expect(authenticated).toEqual(evidence);
+    expect(authenticated.analysis_profile?.provider).toEqual(evidence.provider);
+    expect(authenticated.subject).toEqual(evidence.subject);
+    const tampered = { ...evidence, normalized_result: "different_entry" };
+    const shapeValid = requireMcpOutput(reply(tampered), "address_name");
+    expect(shapeValid).toEqual(tampered);
+    expect(() => parseEvidence(shapeValid)).toThrow(/semantic identifier/u);
+  },
+);
+
+it("rejects malformed and disagreeing replies at the Ghidra address-context verifier call boundary", async () => {
+  const source = await readFile(
+    new URL(
+      "../../../scripts/verify-real-ghidra-address-context.mjs",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const declaration = parse(source, { sourceType: "module" }).program.body.find(
+    (node) => node.type === "FunctionDeclaration" && node.id?.name === "call",
+  );
+  if (declaration?.start == null || declaration.end == null)
+    throw new Error("Ghidra verifier call boundary missing");
+  const evidence = ghidraEvidence();
+  let response: unknown;
+  // Execute the script's actual call boundary without launching its compiler or provider.
+  const call = runInNewContext(
+    `(${source.slice(declaration.start, declaration.end)})`,
+    {
+      assert,
+      client: { callTool: async () => response },
+      ...(await verifierResults()),
+    },
+  ) as (name: string) => Promise<unknown>;
+  response = { ...textReply(evidence), structuredContent: evidence };
+  await expect(call("address_name")).resolves.toEqual(evidence);
+  const malformed = { ...evidence, normalized_result: { name: "entry" } };
+  response = { ...textReply(malformed), structuredContent: malformed };
+  await expect(call("address_name")).rejects.toThrow();
+  response = {
+    ...textReply(evidence),
+    structuredContent: { ...evidence, normalized_result: "different_entry" },
+  };
+  await expect(call("address_name")).rejects.toThrow(
+    "text and structured results disagree",
+  );
+});
+
 it("rejects disagreement in lifecycle envelope fields that the named schema would otherwise discard", async () => {
   const { requireMcpOutput } = await verifierResults();
   const result = retainedBundle();
@@ -260,7 +369,7 @@ it("rejects disagreement in lifecycle envelope fields that the named schema woul
 
 it("rejects disagreement in complete Evidence provenance before downstream extraction", async () => {
   const { requireMcpOutput } = await verifierResults();
-  const evidence = namedEvidence();
+  const evidence = ghidraEvidence();
   expect(() =>
     requireMcpOutput(
       {
@@ -321,4 +430,146 @@ it("requires canonical complete tool errors before inspecting their diagnostic f
   expect(() => requireMcpToolError(textReply({ error }))).toThrow(
     "Expected an MCP tool failure",
   );
+});
+
+it.each(["transport disagreement", "malformed normalized result"])(
+  "admits complete Wasm Evidence at the interface verifier boundary: %s",
+  async (scenario) => {
+    const source = await readFile(
+      new URL(
+        "../../../scripts/verify-wasm-interface-comparison.mjs",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const declaration = parse(source, { sourceType: "module" })
+      .program.body.filter((node) => node.type === "VariableDeclaration")
+      .flatMap((node) => node.declarations)
+      .find(
+        (node) => node.id.type === "Identifier" && node.id.name === "inspect",
+      )?.init;
+    if (declaration?.start == null || declaration.end == null)
+      throw new Error("Wasm interface verifier inspect boundary missing");
+    const report = wasmArtifactFixture();
+    const execution = wasmArtifactExecution(report);
+    const evidence = createAnalysisExecutionEvidence(
+      "inspect_wasm_artifact",
+      { path: report.artifact.path },
+      execution,
+      "observed",
+    );
+    let response: unknown;
+    const inspect = runInNewContext(
+      `(${source.slice(declaration.start, declaration.end)})`,
+      {
+        assert,
+        client: { callTool: async () => response },
+        parseEvidence,
+        ...(await verifierResults()),
+      },
+    ) as (path: string) => Promise<unknown>;
+    response = { ...textReply(evidence), structuredContent: evidence };
+    await expect(inspect(report.artifact.path)).resolves.toEqual(evidence);
+
+    if (scenario === "transport disagreement") {
+      const different = wasmArtifactFixture();
+      different.limitations = ["Independent complete Wasm observation."];
+      const structured = createAnalysisExecutionEvidence(
+        "inspect_wasm_artifact",
+        { path: different.artifact.path },
+        wasmArtifactExecution(different),
+        "observed",
+      );
+      expect(
+        parseEvidence(
+          toolContract("inspect_wasm_artifact").outputSchema.parse(structured),
+        ),
+      ).toEqual(structured);
+      response = { ...textReply(evidence), structuredContent: structured };
+      await expect(inspect(report.artifact.path)).rejects.toThrow(
+        "text and structured results disagree",
+      );
+    } else {
+      const malformed = createEvidence(
+        execution.subject ?? undefined,
+        execution.provider,
+        {
+          operation: "inspect_wasm_artifact",
+          parameters: { path: report.artifact.path },
+          result: "authentic Evidence with an invalid Wasm result shape",
+        },
+      );
+      expect(parseEvidence(malformed)).toEqual(malformed);
+      response = { ...textReply(malformed), structuredContent: malformed };
+      await expect(inspect(report.artifact.path)).rejects.toThrow();
+    }
+    response = textReply(evidence);
+    await expect(inspect(report.artifact.path)).rejects.toThrow();
+  },
+);
+
+it("preserves raw extraction manifest extensions for separate Evidence authentication", async () => {
+  const { requireMcpOutput } = await verifierResults();
+  const inventoryEvidence = ARTIFACT_COMPARISON_EXAMPLE.left;
+  const inventory = artifactInventoryResultSchema.parse(
+    inventoryEvidence.normalized_result,
+  );
+  const extractionSemantic = {
+    source_manifest_id: inventory.manifest.manifest_id,
+    selected_occurrence_ids: [],
+    files_sha256: digestCanonicalValue([], "Artifact"),
+    output_root_alias: "$OUTPUT_ROOT",
+  };
+  const report = {
+    manifest: inventory.manifest,
+    extraction_manifest: {
+      extraction_id: `aex_${digestCanonicalValue(extractionSemantic, "Artifact")}`,
+      ...extractionSemantic,
+    },
+    output_root: "/owned/output",
+    artifacts: [],
+    containment_verified: true,
+    cleanup: { attempted: true, verified: true, residual_paths: [] },
+    coverage: inventory.coverage,
+    provenance: inventory.provenance,
+    integrity_contradictions: inventory.integrity_contradictions,
+    limitations: [],
+  };
+  const evidenceFor = (result: unknown) =>
+    createEvidence(undefined, inventoryEvidence.provider, {
+      operation: "extract_artifact",
+      parameters: {},
+      result,
+    });
+  const evidence = evidenceFor(report);
+  const extendedResult = {
+    ...report,
+    manifest: { ...report.manifest, vendor_note: "retained source extension" },
+  };
+  const tampered = { ...evidence, normalized_result: extendedResult };
+  const reply = (value: unknown) => ({
+    ...textReply(value),
+    structuredContent: value,
+  });
+  // Shape projection discards the extension; it cannot authenticate its source ID.
+  expect(toolContract("extract_artifact").outputSchema.parse(tampered)).toEqual(
+    evidence,
+  );
+  const admittedTampered = requireMcpOutput(
+    reply(tampered),
+    "extract_artifact",
+  );
+  expect(admittedTampered).toEqual(tampered);
+  expect(() => parseEvidence(admittedTampered)).toThrow(/semantic identifier/u);
+
+  const authentic = evidenceFor(extendedResult);
+  const projected =
+    toolContract("extract_artifact").outputSchema.parse(authentic);
+  expect(projected).toEqual({ ...authentic, normalized_result: report });
+  const admittedAuthentic = requireMcpOutput(
+    reply(authentic),
+    "extract_artifact",
+  );
+  expect(admittedAuthentic).toEqual(authentic);
+  expect(parseEvidence(admittedAuthentic)).toEqual(authentic);
 });

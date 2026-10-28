@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { localPathStringSchema } from "../domain/localPath.js";
 import { compareWasmInterfaces } from "../application/wasm/WasmInterfaceComparisonService.js";
 import { parseCliJsonInput } from "../cliJsonInput.js";
@@ -85,7 +86,7 @@ export const registerWasmCommands = (
             "wabt-artifact",
             "inspect_wasm_artifact",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });

@@ -4,8 +4,6 @@ import type {
   HeaderArchitecture,
   MipsElfMetadata,
   PeCodeViewRecord,
-  RiscvElfMetadata,
-  PowerPcElfMetadata,
   UniversalMachOSlice,
 } from "./binaryTargetTypes.js";
 import { err, ok, type Result } from "./result.js";
@@ -48,13 +46,13 @@ export type ExecutableMetadata =
       readonly format: "elf";
       readonly architecture: "riscv";
       readonly availableArchitectures: readonly "riscv"[];
-      readonly riscv: RiscvElfMetadata;
+      readonly riscv: ElfFamilyMetadata;
     }
   | {
       readonly format: "elf";
       readonly architecture: "powerpc";
       readonly availableArchitectures: readonly "powerpc"[];
-      readonly powerpc: PowerPcElfMetadata;
+      readonly powerpc: ElfFamilyMetadata;
     }
   | {
       readonly format: "elf";
@@ -103,9 +101,7 @@ export const claimsExecutableHeader = (
 ): boolean =>
   (bytes.length >= 4 &&
     (bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) ||
-      [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(
-        bytes.readUInt32BE(0),
-      ))) ||
+      readMachoHeaderPrefixFacts(bytes).format !== null)) ||
   (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) ||
   readFatContainerHeader(bytes, fileSize).state !== "not-fat";
 
@@ -132,8 +128,7 @@ export const parseExecutableHeader = (
       parseMzHeaderEvidence(bytes, fileSize, mzWindowsHeaderSignature),
     );
   if (bytes.length < 8) return err("truncated or unsupported binary header");
-  const magic = bytes.readUInt32BE(0);
-  if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe].includes(magic))
+  if (readMachoHeaderPrefixFacts(bytes).format !== null)
     return parseThinMachO(bytes, fileSize);
   const fatHeader =
     fatEvidence?.header ?? readFatContainerHeader(bytes, fileSize);
@@ -152,8 +147,7 @@ const parseThinMachO = (
   const table = readMachoLoadCommandTableHeader(bytes, fileSize);
   if (!table.ok) return table;
   if (table.value === null) return err("unsupported binary format");
-  const identity = readMachoHeaderPrefixFacts(bytes.subarray(0, 12)).identity;
-  if (identity === null) return err("unsupported Mach-O architecture");
+  const { identity } = table.value;
   const architecture =
     identity.cpuType === CPU_TYPE_ARM64_32
       ? "arm64_32"

@@ -1,7 +1,7 @@
+import { readBinaryPlistLayout } from "./BinaryPlistLayout.js";
 import { parseBinary } from "plist";
 import { markPlistDictionary } from "../../domain/apple/plistUid.js";
 import {
-  binaryPlistObjectOffsets,
   decodeBinaryPlistScalars,
   scanBinaryPlistScalars,
   type BinaryPlistScalarMetadata,
@@ -13,9 +13,14 @@ const scalarArrayInput = (
   bytes: Buffer,
   objects: readonly number[],
 ): Buffer => {
-  const trailer = bytes.length - 32;
-  const referenceWidth = bytes[trailer + 7]!;
-  const objectCount = Number(bytes.readBigUInt64BE(trailer + 8));
+  // Normalization may relocate objects and change both widths. These facts
+  // belong to the compatible decoder copy, not the original source plan.
+  const compatibleLayoutResult = readBinaryPlistLayout(bytes);
+  if (!compatibleLayoutResult.ok)
+    throw new RangeError("binary plist trailer is truncated");
+  const compatibleLayout = compatibleLayoutResult.value;
+  const referenceWidth = compatibleLayout.referenceWidth;
+  const objectCount = Number(compatibleLayout.objectCount);
   const rootOffset = bytes.length;
   const rootLength = 10 + objects.length * referenceWidth;
   const tableOffset = rootOffset + rootLength;
@@ -33,7 +38,7 @@ const scalarArrayInput = (
     }
   }
   let object = 0;
-  for (const offset of binaryPlistObjectOffsets(bytes)) {
+  for (const offset of compatibleLayout.objectOffsets()) {
     output.writeBigUInt64BE(offset, tableOffset + object * 8);
     object += 1;
   }

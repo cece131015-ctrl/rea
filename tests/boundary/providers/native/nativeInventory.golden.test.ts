@@ -977,6 +977,39 @@ it("reads exports from the symbol table without llvm-nm's dyld-info pass", async
   expect(nmCommands(execution.value.result)).toEqual(nmArguments);
 });
 
+it("binds leading-space exports to their exact nm identities", async () => {
+  // Real clang dylib: .globl "  _spaced"; "  _spaced": ret; .globl _spaced; _spaced: ret.
+  // dyld_info separates the address from the literal symbol with two spaces.
+  const names = "  _spaced\n_spaced\n";
+  const { runner, nmArguments } = symbolTableRunner(
+    {
+      "dyld_info:-exports": [
+        "fixture [arm64]:",
+        "    -exports:",
+        "        offset      symbol",
+        "        0x000002A0    _spaced",
+        "        0x000002A4  _spaced",
+        "",
+      ].join("\n"),
+    },
+    { symbolTable: names, withDyldInfo: names },
+  );
+  const execution = await new NativeMacOSProvider({}, runner, "darwin")
+    .createClient(machoTarget("/private/fixture"))
+    .execute("inspect_macho", {});
+  if (!execution.ok) throw execution.error;
+  expect(nmArguments).toHaveLength(1);
+  const exported = (
+    execution.value.result as {
+      exports: { items: { name: string; address: string | null }[] };
+    }
+  ).exports.items;
+  expect(exported).toEqual([
+    expect.objectContaining({ name: "  _spaced", address: "0x1000002a0" }),
+    expect.objectContaining({ name: "_spaced", address: "0x1000002a4" }),
+  ]);
+});
+
 it("keeps an export name ending in a carriage return distinct", async () => {
   // Captured from a clang executable exporting "trailing\r" and "trailing".
   const names = "__mh_execute_header\n_main\ntrailing\ntrailing\r\n";

@@ -761,7 +761,9 @@ describe("captured script final commit cancellation", () => {
       });
     },
   );
+});
 
+describe("captured script path validation", () => {
   it("identifies a missing capture file and rejected host path syntax", async () => {
     const { input, resources } = await setup();
     const missing = await exportWebScripts(
@@ -784,15 +786,67 @@ describe("captured script final commit cancellation", () => {
         ],
       },
     });
-    const relative = await exportWebScripts(
+    const relativeCapture = await exportWebScripts(
       {
         ...input,
         capture_path: "capture.json",
       },
       resources,
     );
-    if (relative.ok) throw new Error("Expected host path error");
-    expect(relative.error._tag).toBe("AnalysisInputError");
+    if (relativeCapture.ok) throw new Error("Expected host path error");
+    expect(relativeCapture.error).toMatchObject({
+      _tag: "AnalysisInputError",
+      issues: [
+        {
+          path: ["capture_path"],
+          reason: "invalid_format",
+          message:
+            "capture_path must be an absolute filesystem path on this host.",
+        },
+      ],
+    });
+
+    const relativeOutput = await exportWebScripts(
+      {
+        ...input,
+        output_directory: "dist",
+      },
+      resources,
+    );
+    if (relativeOutput.ok) throw new Error("Expected host path error");
+    expect(relativeOutput.error).toMatchObject({
+      _tag: "AnalysisInputError",
+      issues: [
+        {
+          path: ["output_directory"],
+          reason: "invalid_format",
+          message:
+            "output_directory must be an absolute filesystem path on this host.",
+        },
+      ],
+    });
+
+    const bothRelative = await exportWebScripts(
+      {
+        capture_path: "capture.json",
+        output_directory: "dist",
+      },
+      resources,
+    );
+    if (bothRelative.ok) throw new Error("Expected host path error");
+    expect(bothRelative.error).toMatchObject({
+      _tag: "AnalysisInputError",
+      issues: [
+        {
+          path: ["capture_path"],
+          reason: "invalid_format",
+        },
+        {
+          path: ["output_directory"],
+          reason: "invalid_format",
+        },
+      ],
+    });
   });
 });
 

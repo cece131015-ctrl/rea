@@ -488,7 +488,15 @@ describe("binary plist shared object-table entries", () => {
     const table = Number(bytes.readBigUInt64BE(bytes.length - 8));
     bytes[table + 2] = 7;
     expect(bytes.subarray(0, 8).toString("ascii")).toBe("bplist00");
-    expect(scanBinaryPlistScalars(bytes).literals.incomplete).toBe(true);
+    const metadata = scanBinaryPlistScalars(bytes);
+    expect(metadata.literals.incomplete).toBe(true);
+    expect(metadata.literals.integers).toEqual(
+      new Map([
+        [9007199254740992, new Set(["9007199254740993"])],
+        [Number(1152921504606846979n), new Set(["1152921504606846979"])],
+      ]),
+    );
+    expect(metadata.literals.unsafeIntegerLiterals).toBe(2);
   });
 });
 
@@ -586,3 +594,20 @@ describe("binary plist scalar clone budgeting", () => {
     expect(bytes.readDoubleBE(14)).toBe(0.1005);
   });
 });
+
+it.each([4n, 0xffffffffffffffffn])(
+  "scans source scalars independently of invalid top object %s",
+  (topObject) => {
+    const bytes = sharedScalarEntries(int64(9007199254740993n));
+    const expected = scanBinaryPlistScalars(bytes);
+    bytes.writeBigUInt64BE(topObject, bytes.length - 16);
+    expect(scanBinaryPlistScalars(bytes)).toEqual(expected);
+    expect(expected.literals.incomplete).toBe(false);
+    expect(expected.literals.unsafeIntegerLiterals).toBe(2);
+    expect(() =>
+      estimateBinaryPlistExpansion(bytes, 1024 * 1024, {
+        numberProjection: true,
+      }),
+    ).toThrow("binary plist trailer or object table is invalid");
+  },
+);

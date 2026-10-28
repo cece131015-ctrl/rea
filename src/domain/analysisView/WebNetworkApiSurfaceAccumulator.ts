@@ -1,3 +1,4 @@
+import { mediaTypeEssence } from "./recordedMediaType.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import { compareUnicodeCodePoints as compare } from "../unicodeCodePointOrder.js";
 import { ok, type Result } from "../result.js";
@@ -21,7 +22,6 @@ import {
   type RouteRule,
   type RouteTemplate,
 } from "./webNetworkRouteTemplates.js";
-import { mediaTypeEssence } from "../mediaType.js";
 
 type Surface = Extract<UnsignedAnalysisView, { kind: "api-surface" }>;
 type Group = Surface["groups"][number];

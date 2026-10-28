@@ -595,3 +595,43 @@ it.each(["header", "launcher"] as const)(
     });
   },
 );
+
+it.each([
+  [0xcafebabe, "fat32"],
+  [0xbebafeca, "fat32"],
+  [0xcafebabf, "fat64"],
+  [0xbfbafeca, "fat64"],
+] as const)(
+  "retains FAT width from a four-byte profile prefix %i",
+  async (magic, container) => {
+    const directory = await createTestTempDirectory(
+      "rea-hopper-prefix-profile-",
+    );
+    const bytes = Buffer.alloc(4);
+    bytes.writeUInt32BE(magic);
+    const path = join(directory, "container.macho");
+    await writeFile(path, bytes);
+    const result = await resolveHopperAnalysisProfile(
+      {
+        path,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        kind: "executable",
+        format: "mach-o-universal",
+        architecture: "arm64",
+        availableArchitectures: ["arm64"],
+        universalSlice: { offset: 4096, size: 64 },
+      },
+      {
+        launcherPath: path,
+        loaderArgsOverride: ["-l", "Mach-O"],
+        provider: { id: "hopper", name: "Hopper Disassembler", version: null },
+        resourceScope: inspectionResources.owner,
+      },
+    );
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.profile?.parameters).toMatchObject({
+      macho_container: container,
+      loader: { source: "configured_override", arguments: ["-l", "Mach-O"] },
+    });
+  },
+);

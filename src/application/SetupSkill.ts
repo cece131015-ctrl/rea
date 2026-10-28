@@ -102,6 +102,7 @@ export class SetupSkillInstallError extends Error {
   readonly rollbackFailures: readonly SkillInstallRollbackFailure[];
   readonly recoveryBackupPaths: readonly string[];
   readonly cleanupOwners: readonly SkillPublicationCleanupOwner[];
+  readonly remediationAction: string;
 
   /** Retry only retained staging cleanup; never reapply a pathname rollback. */
   async retryCleanup(): Promise<readonly SkillInstallRollbackFailure[]> {
@@ -115,10 +116,12 @@ export class SetupSkillInstallError extends Error {
     readonly rollbackFailures: readonly SkillInstallRollbackFailure[];
     readonly recoveryBackupPaths: readonly string[];
     readonly cleanupOwners?: readonly SkillPublicationCleanupOwner[];
+    readonly remediationAction?: string;
     readonly cause: unknown;
   }) {
     const message = [
-      `REA skill ${input.stage} failed at ${input.path}: ${input.reason}.`,
+      `REA skill ${input.stage} failed at ${input.path}.`,
+      `Reason: ${input.reason}`,
       ...(input.rollbackFailures.length === 0
         ? []
         : [
@@ -129,7 +132,7 @@ export class SetupSkillInstallError extends Error {
         : [
             `Existing-file backups remain at ${input.recoveryBackupPaths.join(", ")}.`,
           ]),
-    ].join(" ");
+    ].join("\n");
     super(message, { cause: input.cause });
     this.path = input.path;
     this.stage = input.stage;
@@ -137,10 +140,13 @@ export class SetupSkillInstallError extends Error {
     this.rollbackFailures = input.rollbackFailures;
     this.recoveryBackupPaths = input.recoveryBackupPaths;
     this.cleanupOwners = input.cleanupOwners ?? [];
+    this.remediationAction =
+      input.remediationAction ??
+      "Correct the reported skill installation failure and rerun setup.";
   }
 
   get remediation(): string {
-    return `${this.message} Check permissions and rerun setup.`;
+    return `${this.message}\n${this.remediationAction}`;
   }
 }
 
@@ -318,6 +324,12 @@ const inspectSkillDirectory = async (
   } catch (cause: unknown) {
     if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
       return ok(undefined);
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOTDIR")
+      return err({
+        path,
+        kind: "not_directory",
+        detail: "A component of the skill path is not a directory (ENOTDIR).",
+      });
     return err({
       path,
       kind: "unreadable",
@@ -350,7 +362,16 @@ const skillDirectoryFailure = (
   new SetupSkillInstallError({
     path: issues[0]?.path ?? "skill bundle",
     stage: "prepare",
-    reason: `${issues.map(({ path, detail }) => `${detail} (${path})`).join(" ")} Use a regular skill directory, or run setup with --skill=false to configure the client without installing the skill`,
+    reason: issues
+      .map(({ path, detail }, index) =>
+        index === 0 ? detail : `${path}: ${detail}`,
+      )
+      .join("\n"),
+    remediationAction: issues.some(
+      ({ kind }) => kind === "unreadable" || kind === "unresolved",
+    )
+      ? "Resolve the reported skill directory inspection failure, or run setup with --skill=false to configure the client without installing the skill."
+      : "Use a regular skill directory, or run setup with --skill=false to configure the client without installing the skill.",
     rollbackFailures: [],
     recoveryBackupPaths: [],
     cause: issues,

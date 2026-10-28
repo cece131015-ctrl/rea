@@ -7,7 +7,7 @@ import { isAbsolute } from "node:path";
 
 import { ConfigurationError } from "../domain/configurationErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { analysisProviderSelectorSchema } from "../contracts/providerSelection.js";
+import { analysisProviderSelectorSchema } from "../domain/providerSelection.js";
 import {
   ghidraCompilerSpecIdSchema,
   ghidraLanguageIdSchema,
@@ -39,6 +39,7 @@ import {
 import { mcpToolFamiliesSchema } from "./mcpToolFamilies.js";
 import { parseLoaderArgs, parseStringArray } from "./parsers.js";
 import { processStartConfigurationSchema } from "./processStart.js";
+import { parseJebMcpEndpoint } from "./jebMcpEndpoint.js";
 
 const environmentSchema = z.object({
   REA_ANALYSIS_PROVIDER: analysisProviderSelectorSchema.default("auto"),
@@ -62,6 +63,20 @@ const environmentSchema = z.object({
     .refine(isAbsolute, "REA_IDA_MCP_CONFIG must be absolute")
     .optional(),
   REA_JEB_MCP_TIMEOUT_MS: providerStartupTimeoutSchema.optional(),
+  REA_JEB_MCP_URL: z
+    .string()
+    .superRefine((value, context) => {
+      const parsed = parseJebMcpEndpoint(value);
+      if (!parsed.ok)
+        context.addIssue({
+          code: "custom",
+          message:
+            typeof parsed.error.cause === "string"
+              ? parsed.error.cause
+              : parsed.error.message,
+        });
+    })
+    .optional(),
   GHIDRA_INSTALL_DIR: z
     .string()
     .min(1)

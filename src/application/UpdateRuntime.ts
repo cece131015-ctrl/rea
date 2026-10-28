@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import { homeDirectoryFromEnvironment } from "../config/homeDirectory.js";
+import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { lt, valid } from "semver";
@@ -89,7 +90,9 @@ export const bunGlobalDirectory = (
   platform: NodeJS.Platform,
 ): string => {
   const explicit = nonemptyEnvironment(environment.BUN_INSTALL_GLOBAL_DIR);
-  if (explicit !== undefined) return resolve(explicit);
+  // Bun opens the explicit project path with native filesystem traversal;
+  // its derived BUN_INSTALL/XDG paths below are normalized lexically instead.
+  if (explicit !== undefined) return absoluteCallerPath(explicit);
   const installRoot = nonemptyEnvironment(environment.BUN_INSTALL);
   if (installRoot !== undefined)
     return resolve(installRoot, "install", "global");
@@ -112,17 +115,22 @@ export const detectBunInstallation = async (
 ): Promise<BunInstallation | undefined> => {
   try {
     const canonicalPackageRoot = await host.canonicalPath(packageRoot);
+    const canonicalGlobalDirectory = await host.canonicalPath(globalDirectory);
     const globalPackageRoot = await host.canonicalPath(
-      join(globalDirectory, "node_modules", PRODUCT_IDENTITY.packageName),
+      join(
+        canonicalGlobalDirectory,
+        "node_modules",
+        PRODUCT_IDENTITY.packageName,
+      ),
     );
     if (
       canonicalPackageRoot !== globalPackageRoot ||
-      !(await host.isFile(join(globalDirectory, "package.json")))
+      !(await host.isFile(join(canonicalGlobalDirectory, "package.json")))
     )
       return undefined;
     return {
       manager: "bun",
-      globalDirectory,
+      globalDirectory: canonicalGlobalDirectory,
       packageRoot: canonicalPackageRoot,
     };
   } catch (cause: unknown) {

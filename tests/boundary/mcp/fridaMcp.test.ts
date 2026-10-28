@@ -13,6 +13,7 @@ import { fridaSessionStatusSummaryViewResultSchema } from "../../../src/domain/a
 import { fridaSessionStatusSchema } from "../../../src/domain/fridaSessionStatus.js";
 import { evidenceBundleSummarySchema } from "../../../src/domain/evidenceRecordSummary.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
+import { parseMcpEvidenceBundle } from "../../fixtures/mcpEvidenceBundle.js";
 
 const createFridaTestProvider = (
   overrides: Partial<FridaInstrumentationPort> = {},
@@ -241,9 +242,7 @@ it("delivers Frida status summaries with complete retained Evidence for both tru
       arguments: {},
     });
     expect(bundle.isError).not.toBe(true);
-    expect(JSON.stringify(bundle.structuredContent)).toContain(
-      "caller-selected-nonsecret",
-    );
+    expect(parseMcpEvidenceBundle(bundle).records).toContainEqual(parent);
     expect(session.evidenceById(parent.evidence_id)).toEqual(parent);
     // Inline/file projection validates the owning result and exact source selection.
     const malformed = createEvidence(undefined, parent.provider ?? undefined, {
@@ -651,8 +650,17 @@ it("retains cancellation Evidence after the MCP client stops waiting", async () 
     name: "get_evidence_bundle",
     arguments: {},
   });
-  expect(JSON.stringify(bundle.structuredContent)).toContain("cancel-observed");
-  expect(JSON.stringify(bundle.structuredContent)).toContain(
-    "instrument_with_frida",
+  expect(bundle.isError).not.toBe(true);
+  expect(parseMcpEvidenceBundle(bundle).records).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        operation: "instrument_with_frida",
+        normalized_result: expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({ payload: "cancel-observed" }),
+          ]),
+        }),
+      }),
+    ]),
   );
 });

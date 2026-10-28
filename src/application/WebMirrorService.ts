@@ -44,6 +44,7 @@ import { WEB_MIRROR_EXPORT_PROVIDER as PROVIDER } from "../domain/investigationP
 import {
   mapWebCaptureExportFailure,
   readSavedWebCapture,
+  savedCapturePathsError,
   type WebCaptureReader,
 } from "./WebCaptureRead.js";
 
@@ -84,17 +85,8 @@ export const exportWebMirrorValidated = async (
   resources: ArtifactResourceScope,
   options: ExecutionOptions = {},
 ): Promise<Result<Evidence, AnalysisError>> => {
-  if (!isAbsolute(input.capture_path) || !isAbsolute(input.output_directory))
-    return err(
-      new AnalysisInputError(EXPORT_OPERATION, undefined, [
-        {
-          path: [],
-          reason: "invalid_format",
-          message:
-            "capture_path and output_directory must be absolute filesystem paths on this host.",
-        },
-      ]),
-    );
+  const invalidPaths = savedCapturePathsError(EXPORT_OPERATION, input);
+  if (invalidPaths !== undefined) return err(invalidPaths);
   try {
     if (options.signal?.aborted)
       return err(

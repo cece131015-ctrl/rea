@@ -17,8 +17,7 @@ import { analyzeParsedJavaScriptReferences } from "../domain/javascript/javascri
 import { traverseJavaScriptAst } from "../domain/javascript/javascriptSemanticTraversal.js";
 import { parseJavaScriptSource } from "../domain/javascript/javascriptSourceParser.js";
 import {
-  isTypeOnlyExportDeclaration,
-  isTypeOnlyImportDeclaration,
+  semanticStaticModuleSource,
   semanticImportEqualsSpecifier,
 } from "../domain/javascript/javascriptModuleDeclaration.js";
 import { stringValue } from "../domain/javascript/javascriptStaticAnalysisHelpers.js";
@@ -868,7 +867,6 @@ const originalModuleEdges = (
   ) => void,
 ): OriginalModuleEdges => {
   const edges: ParsedSourceMapItem["original_module_edges"] = [];
-  const seen = new Set<string>();
   const incomplete: string[] = [];
   for (const source of sources) {
     check();
@@ -892,6 +890,7 @@ const originalModuleEdges = (
     // A recovered program still yields the imports it did parse, but nodes
     // after an unrecoverable point are missing, so the edges are a subset.
     if (parsed.errors.length > 0) incomplete.push(sourceName);
+    const seen = new Set<string>();
     let unboundRequires: ReadonlySet<string> | undefined;
     traverseJavaScriptAst(parsed, {
       enter: (node) => {
@@ -920,10 +919,11 @@ const originalModuleEdges = (
           )
             return;
         }
-        const key = `${sourceName}\0${kind}\0${specifier}`;
+        const key = `${kind}\0${specifier}`;
         if (seen.has(key)) return;
         seen.add(key);
         const edge = {
+          declaration_index: source.declaration_index,
           from_source: sourceName,
           kind,
           specifier,
@@ -1233,18 +1233,9 @@ const originalDependency = (
   readonly specifier: string;
   readonly requireCallee?: t.Identifier;
 } | null => {
-  if (
-    t.isImportDeclaration(node) ||
-    t.isExportAllDeclaration(node) ||
-    t.isExportNamedDeclaration(node)
-  )
-    return node.source === null ||
-      node.source === undefined ||
-      (t.isImportDeclaration(node)
-        ? isTypeOnlyImportDeclaration(node)
-        : isTypeOnlyExportDeclaration(node))
-      ? null
-      : { kind: "static_import", specifier: node.source.value };
+  const moduleSource = semanticStaticModuleSource(node);
+  if (moduleSource !== null)
+    return { kind: "static_import", specifier: moduleSource.value };
   if (t.isImportExpression(node)) {
     const specifier = stringValue(node.source);
     return specifier === undefined

@@ -45,6 +45,7 @@ import {
 } from "../domain/wasm/wasmArtifact.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { runOwnedCommand } from "../process/OwnedCommand.js";
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
 import { artifactCommandOutput } from "../process/ArtifactAnalysisResources.js";
 import {
@@ -105,8 +106,11 @@ export class WabtArtifactProvider implements WasmArtifactPort {
     input: InspectWasmArtifactInput,
     options?: WasmArtifactExecutionOptions,
   ): Promise<Result<WasmArtifactExecution, AnalysisError>> {
+    const environment = snapshotEnvironment(this.environment);
     try {
-      return await this.#resources.run(() => this.#inspect(input, options));
+      return await this.#resources.run(() =>
+        this.#inspect(input, environment, options),
+      );
     } catch (cause: unknown) {
       if (cause instanceof ArtifactResourceRetryFailure)
         return err(resourceCleanupFailure(cause));
@@ -130,6 +134,7 @@ export class WabtArtifactProvider implements WasmArtifactPort {
 
   async #inspect(
     input: InspectWasmArtifactInput,
+    environment: Readonly<NodeJS.ProcessEnv>,
     options?: WasmArtifactExecutionOptions,
   ): Promise<Result<WasmArtifactExecution, AnalysisError>> {
     let runtime: WabtRuntime | undefined;
@@ -208,7 +213,7 @@ export class WabtArtifactProvider implements WasmArtifactPort {
         throw new AnalysisCancelledError(OPERATION, {
           cause: options.signal.reason,
         });
-      const directory = this.environment.REA_WABT_BIN_DIRECTORY ?? "";
+      const directory = environment.REA_WABT_BIN_DIRECTORY ?? "";
       if (!isAbsolute(directory))
         throw new Error(
           "REA_WABT_BIN_DIRECTORY must be an absolute tool directory.",
@@ -296,7 +301,7 @@ export class WabtArtifactProvider implements WasmArtifactPort {
             // and process-group identity own cleanup after their exec handoff.
             expectedCommand: null,
             runId: `rea-wabt-${randomUUID()}`,
-            hostEnvironment: this.environment,
+            hostEnvironment: environment,
           },
           {
             timeoutMs: commandTimeoutMs,

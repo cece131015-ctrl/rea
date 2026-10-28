@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { createSqliteDatabaseService } from "../composition/sqlite.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
@@ -80,7 +81,7 @@ export const registerSqliteCommands = (
             "sqlite",
             "inspect_sqlite_database",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });

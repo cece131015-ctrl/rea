@@ -17,7 +17,11 @@ import {
   MACHO_ARCHITECTURE_POLICIES,
   selectMachoArchitectureName,
 } from "./MachoArchitectureSelection.js";
-import { parseDyldExports, parseDyldImports } from "./parsers/dyldInfo.js";
+import {
+  parseDyldExportAddressRow,
+  parseDyldExports,
+  parseDyldImports,
+} from "./parsers/dyldInfo.js";
 import { parseLipoCapture, type LipoArchitecture } from "./parsers/lipo.js";
 import { withoutEchoedPathHeader } from "./parsers/echoedPath.js";
 import { parseOtoolLoadCommands } from "./parsers/otool.js";
@@ -149,7 +153,9 @@ export const inspectNativeMacho = async (
       return err(unusableNativeCommandOutput(captured.value));
     captures.push(captured.value);
   }
-  const limitations: string[] = [];
+  const limitations = architectures.flatMap(
+    (architecture) => architecture.limitations,
+  );
   if (optional === null)
     limitations.push(
       `vtool cannot select the ${selectedArchitecture} slice; build metadata is normalized from otool only.`,
@@ -474,7 +480,7 @@ const namesEveryExport = (
       const rows = parseDyldExports(line, null, names);
       // The parser withholds a row only when nm names both of its readings.
       if (rows.length === 0)
-        return names.has(/^0x[\da-f]+\s+(.+)$/isu.exec(line)?.[1] ?? "");
+        return names.has(parseDyldExportAddressRow(line)?.text ?? "");
       return rows.length === 1 && names.has(rows[0]!.name);
     });
 };

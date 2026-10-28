@@ -1,3 +1,7 @@
+import {
+  readBinaryPlistLayout,
+  readBinaryPlistUnsigned64,
+} from "./BinaryPlistLayout.js";
 import { decodeXmlPlistText } from "../../domain/propertyListXmlText.js";
 import { hasBinaryPlistSignature } from "../../domain/apple/appleArchiveFormat.js";
 import {
@@ -265,24 +269,26 @@ export const estimateBinaryPlistExpansion = (
 ): PlistDecodePreflight => {
   if (bytes.length < 40)
     throw new TypeError("binary plist trailer is truncated");
-  const trailer = bytes.length - 32;
-  const offsetSize = bytes[trailer + 6] ?? 0;
-  const referenceSize = bytes[trailer + 7] ?? 0;
+  const sourceLayoutResult = readBinaryPlistLayout(bytes);
+  if (!sourceLayoutResult.ok)
+    throw new TypeError("binary plist trailer is truncated");
+  const sourceLayout = sourceLayoutResult.value;
+  const {
+    trailerOffset: trailer,
+    offsetWidth: offsetSize,
+    referenceWidth: referenceSize,
+  } = sourceLayout;
   if (offsetSize < 1 || referenceSize < 1)
     throw new TypeError("binary plist trailer integer sizes are invalid");
+  const safeDeclaration = (value: bigint): number =>
+    value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : -1;
   const readInteger = (offset: number, size: number): number => {
     if (offset < 0 || size < 1 || offset + size > bytes.length) return -1;
-    let value = 0n;
-    for (let index = 0; index < size; index += 1)
-      value = BigInt.asUintN(
-        64,
-        (value << 8n) | BigInt(bytes[offset + index] ?? 0),
-      );
-    return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : -1;
+    return safeDeclaration(readBinaryPlistUnsigned64(bytes, offset, size));
   };
-  const objectCount = readInteger(trailer + 8, 8);
-  const topObject = readInteger(trailer + 16, 8);
-  const offsetTable = readInteger(trailer + 24, 8);
+  const objectCount = safeDeclaration(sourceLayout.objectCount);
+  const topObject = safeDeclaration(sourceLayout.topObject);
+  const offsetTable = safeDeclaration(sourceLayout.offsetTable);
   const tableEnd = bounds === "strict" ? trailer : bytes.length;
   const objectsEnd = bounds === "strict" ? offsetTable : bytes.length;
   if (
@@ -341,7 +347,7 @@ export const estimateBinaryPlistExpansion = (
   const readDictionaryKey = (object: number): string => {
     const prior = dictionaryKeys.get(object);
     if (prior !== undefined) return prior;
-    const offset = readInteger(offsetTable + object * offsetSize, offsetSize);
+    const offset = safeDeclaration(sourceLayout.objectOffset(object));
     if (offset < 8 || offset >= objectsEnd)
       throw new TypeError("binary plist object offset is invalid");
     const marker = bytes[offset] ?? 0;
@@ -403,10 +409,7 @@ export const estimateBinaryPlistExpansion = (
         "expansion",
         `binary plist reference expansion exceeds ${budget}`,
       );
-    const offset = readInteger(
-      offsetTable + entry.object * offsetSize,
-      offsetSize,
-    );
+    const offset = safeDeclaration(sourceLayout.objectOffset(entry.object));
     if (offset < 8 || offset >= objectsEnd)
       throw new TypeError("binary plist object offset is invalid");
     if (numberProjection) reachableObjectOffsets.add(offset);

@@ -76,7 +76,10 @@ the HTML parser reconstructs an unclosed `<a>` or `<font>` element.
 - A reference whose absolute URL (fragment removed) was captured points to the
   local view (HTML/CSS) or exact file, keeping the fragment.
 - An uncaptured relative reference becomes absolute, so it never silently points
-  at a missing local file. Opening it needs network access.
+  at a missing local file; an uncaptured absolute reference keeps its spelling.
+  Opening either needs network access.
+- An empty resource URL (`<img src="">`) fetches nothing and stays empty; an empty
+  hyperlink is resolved like a fragment-only one.
 - `data:`, `mailto:` and other non-HTTP references are unchanged, and so are empty
   and fragment-only references that stay in the same document.
 - The document base is the first `<base href>` outside `<template>` content, even

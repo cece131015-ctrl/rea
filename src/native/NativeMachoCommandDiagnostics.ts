@@ -17,24 +17,34 @@ const dyldFailureDiagnostics = (
     : outputs.flatMap((output) =>
         withoutEchoedPathHeader(output, capture.arguments.at(-1))
           .split(/\r?\n/u)
-          .map((line) => line.trim().replace(/^(?:dyld_info:\s*)/u, "")),
+          .map((line) => line.trim().replace(/^(?:dyld_info:\s*)/u, ""))
+          .filter(Boolean),
       );
 
-/** Recognize only dyld_info's target-specific missing-UUID refusal. */
+/** Admit the observed refusal only when it is the sole settled diagnostic. */
+const dyldFailureDiagnostic = (
+  capture: NativeCommandCapture,
+): string | null => {
+  const diagnostics = dyldFailureDiagnostics(capture, [
+    capture.stdout,
+    capture.stderr,
+  ]);
+  return diagnostics.length === 1 ? (diagnostics[0] ?? null) : null;
+};
+
+/** Keep missing-UUID admission limited to its observed stdout-only refusal. */
 export const isMissingUuidDyldFailure = (
   capture: NativeCommandCapture,
 ): boolean =>
-  dyldFailureDiagnostics(capture, [capture.stdout]).includes(
-    MISSING_UUID_DIAGNOSTIC,
-  );
+  capture.stderr.trim().length === 0 &&
+  dyldFailureDiagnostic(capture) === MISSING_UUID_DIAGNOSTIC;
 
-/** The narrowly observed dyld refusal for an unbacked dSYM text section. */
+/** Admit the observed dSYM refusal only when no other diagnostic is present. */
 export const isUnbackedTextDyldFailure = (
   capture: NativeCommandCapture,
 ): boolean =>
-  dyldFailureDiagnostics(capture, [capture.stdout, capture.stderr]).includes(
-    "section '__TEXT/__text' has offset=0 but is not a zero-fill section type",
-  );
+  dyldFailureDiagnostic(capture) ===
+  "section '__TEXT/__text' has offset=0 but is not a zero-fill section type";
 
 /** Reported CORE/FVMLIB refusals still require an independently matching header. */
 export const parseDyldFileTypeRefusal = (

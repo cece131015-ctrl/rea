@@ -1,4 +1,6 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
+import { cliIntegerArgument } from "./options.js";
 
 import type { DirectAnalysis } from "../composition/directAnalysis.js";
 import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
@@ -108,7 +110,7 @@ const registerNativeUiCommands = (
           "observe_native_ui",
           nativeUiScope(options),
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
   const operation = "capture_native_ui_scenario";
@@ -152,7 +154,7 @@ const registerNativeUiCommands = (
             ? scenario
             : { ...scenario, native_ui_deadline_ms: deadline },
           logger,
-        );
+        ).then(projectCliAnalysisResult);
       }),
   });
 };
@@ -209,7 +211,7 @@ const registerNativeCommands = (
               ? {}
               : { native_command_timeout_ms: options.nativeCommandTimeoutMs },
             logger,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
     });
   }
@@ -239,7 +241,7 @@ const registerNativeCommands = (
               : { native_command_timeout_ms: options.nativeCommandTimeoutMs }),
           },
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
   cli.command(CLI_COMMANDS.demangleSwift, {
@@ -263,7 +265,7 @@ const registerNativeCommands = (
               : { native_command_timeout_ms: options.nativeCommandTimeoutMs }),
           },
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
 };
@@ -287,13 +289,7 @@ const registerReferenceSourceCommand = (
         .describe(
           "Complete committed graph or compact historical-source summary",
         ),
-      outlineDepth: z
-        .number()
-        .int()
-        .safe()
-        // After .safe(): its safe-range check overwrites an earlier minimum,
-        // which advertised negative depths the parser rejects.
-        .nonnegative()
+      outlineDepth: cliIntegerArgument(0)
         .optional()
         .describe(
           "Summary outline path depth (default: 2; 0 omits entries); requires --detail summary",

@@ -6,7 +6,7 @@ import {
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { resolveGhidraProject } from "./GhidraProjectSnapshot.js";
 import { DeferredAnalysisClient } from "../providers/DeferredAnalysisClient.js";
-import type { ProviderInspectionScope } from "../providers/ProviderInspectionScope.js";
+import type { ProviderInspectionScope } from "../application/ProviderInspectionScope.js";
 import { analysisClientFailureForOperation } from "../providers/AnalysisClientFailure.js";
 import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import {

@@ -25,14 +25,10 @@ export const compareProcessTraces = (
         ? null
         : { side: "right" as const, ...rightEvaluation.diagnostic }
       : { side: "left" as const, ...leftEvaluation.diagnostic };
-  const outcomesDiffer =
-    leftEvaluation.result.status !== rightEvaluation.result.status ||
-    JSON.stringify(
-      leftEvaluation.result.raw_trace.map(({ event_id }) => event_id),
-    ) !==
-      JSON.stringify(
-        rightEvaluation.result.raw_trace.map(({ event_id }) => event_id),
-      );
+  const outcomesDiffer = processTraceOutcomesDiffer({
+    left: leftEvaluation.result,
+    right: rightEvaluation.result,
+  });
   return processTraceComparisonResultSchema.parse({
     verdict:
       leftEvaluation.result.status === "unknown" ||
@@ -52,8 +48,11 @@ export const compareProcessTraces = (
 
 /** Whether trace conformance or raw declared order differs across captures. */
 export const processTraceOutcomesDiffer = (
-  comparison: ProcessTraceComparisonResult,
+  comparison: Pick<ProcessTraceComparisonResult, "left" | "right">,
 ): boolean =>
   comparison.left.status !== comparison.right.status ||
-  JSON.stringify(comparison.left.raw_trace.map(({ event_id }) => event_id)) !==
-    JSON.stringify(comparison.right.raw_trace.map(({ event_id }) => event_id));
+  comparison.left.raw_trace.length !== comparison.right.raw_trace.length ||
+  comparison.left.raw_trace.some(
+    ({ event_id }, index) =>
+      event_id !== comparison.right.raw_trace[index]?.event_id,
+  );

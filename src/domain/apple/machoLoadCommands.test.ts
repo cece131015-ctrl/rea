@@ -1,4 +1,9 @@
 import { expect, it } from "vitest";
+import { hasMachoMagic, readMachoHeaderPrefixFacts } from "./machoContainer.js";
+import {
+  claimsExecutableHeader,
+  parseExecutableHeader,
+} from "../binaryTarget.js";
 import {
   readMachoHeaderDeclarations,
   readMachoLoadCommandDeclarations,
@@ -31,6 +36,29 @@ it.each([
       fileType: 0xffffffff,
       identity: { cpuType: 0xfedcba98, cpuSubtype: 0x89abcdef },
     };
+    const format = { wide, littleEndian, headerSize: wide ? 32 : 28 };
+    for (const length of [0, 3, 4, 11, 12]) {
+      const prefix = bytes.subarray(0, length);
+      expect(hasMachoMagic(prefix)).toBe(length >= 4);
+      expect(readMachoHeaderPrefixFacts(prefix)).toEqual({
+        magic: length < 4 ? null : magic,
+        format: length < 4 ? null : format,
+        identity: length < 12 ? null : expected.identity,
+      });
+      expect(readMachoHeaderDeclarations(prefix, 32)).toEqual(
+        length < 4
+          ? { ok: true, value: null }
+          : {
+              ok: false,
+              error: `truncated Mach-O header: a ${wide ? 64 : 32}-bit header needs ${format.headerSize} bytes; the file has 32`,
+            },
+      );
+    }
+    expect(claimsExecutableHeader(bytes.subarray(0, 4))).toBe(true);
+    expect(parseExecutableHeader(bytes.subarray(0, 4), "arm64")).toEqual({
+      ok: false,
+      error: "truncated or unsupported binary header",
+    });
     expect(readMachoHeaderDeclarations(bytes, 32)).toEqual({
       ok: true,
       value: expected,
@@ -55,5 +83,27 @@ it.each([
     expect(
       readMachoHeaderDeclarations(bytes.subarray(0, 27), 32),
     ).toMatchObject({ ok: false });
+  },
+);
+
+it.each([
+  0xcafebabe, 0xcafebabf, 0xbebafeca, 0xbfbafeca, 0x7f454c46, 0xffffffff,
+])(
+  "retains raw non-thin magic %s without thin format or CPU claims",
+  (magic) => {
+    const bytes = Buffer.alloc(12, 0xff);
+    bytes.writeUInt32BE(magic, 0);
+    expect(hasMachoMagic(bytes.subarray(0, 4))).toBe(
+      magic !== 0x7f454c46 && magic !== 0xffffffff,
+    );
+    expect(readMachoHeaderPrefixFacts(bytes)).toEqual({
+      magic,
+      format: null,
+      identity: null,
+    });
+    expect(readMachoHeaderDeclarations(bytes, bytes.length)).toEqual({
+      ok: true,
+      value: null,
+    });
   },
 );

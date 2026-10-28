@@ -1,3 +1,4 @@
+import { describeResidualUnknownGraphConstraint } from "./residualUnknownGraphError.js";
 import {
   AnalysisAccessDeniedError,
   AnalysisArtifactChangedError,
@@ -70,7 +71,9 @@ export const analysisErrorRemediationAction = (
   if (error instanceof AnalysisCapabilityUnavailableError && error.retryable)
     return "Review details.reason, then retry the same analysis after the condition clears.";
   if (error instanceof EvidenceFileError && error.published !== undefined)
-    return "Use the published file at details.published_path and resolve the reported staging cleanup failure.";
+    return error.published.path === undefined
+      ? "Resolve the reported staging cleanup failure. Publication completed; its path identity is excluded."
+      : "Use the published file at details.published_path and resolve the reported staging cleanup failure.";
   if (
     error instanceof ProviderSelectionError &&
     error.remediationAction !== undefined
@@ -175,6 +178,43 @@ export const analysisErrorRemediationAction = (
     error.remediationAction !== undefined
   )
     return error.remediationAction;
+  if (
+    error instanceof UnknownRegistryError &&
+    error.reason === "constraint" &&
+    error.constraint !== undefined
+  ) {
+    const suffix = " Do not repeat the unchanged call.";
+    switch (error.constraint.kind) {
+      case "missing_evidence":
+        return (
+          "Use an Evidence ID retained in this session; obtain or import the missing Evidence before referencing it." +
+          suffix
+        );
+      case "missing_unknown":
+        return (
+          "Use an unknown_id retained in this session; create or import the related unknown before referencing it." +
+          suffix
+        );
+      case "resolution_unproven":
+        return (
+          "Supply supporting non-mutation Evidence matching the unknown's required authority, confidence and environment, or withdraw the unsupported resolution." +
+          suffix
+        );
+      case "contradicting_evidence":
+        return (
+          "Reconcile the contradicting Evidence before claiming a verified resolution." +
+          suffix
+        );
+      case "dependency_cycle":
+        return (
+          "Correct the depends-on relationships to remove the dependency cycle." +
+          suffix
+        );
+      case "history_gap":
+      case "revision_chain":
+        break;
+    }
+  }
   if (error instanceof UnknownRegistryError && error.reason === "not-found")
     return "Check that the unknown_id belongs to this session, then retry.";
   return analysisErrorUserMessage(error);
@@ -232,7 +272,7 @@ export const analysisErrorCategory = (
     return "invalid_input";
   if (
     error instanceof UnknownRegistryError &&
-    error.reason === "already-exists"
+    (error.reason === "already-exists" || error.reason === "constraint")
   )
     return "invalid_input";
   return STATIC_ERROR_CATEGORIES[error._tag] ?? "execution_failure";
@@ -325,6 +365,8 @@ export const analysisErrorUserMessage = (error: AnalysisError): string => {
     return "This residual unknown already exists in the session. Reuse it or call update_unknown with its current expected_revision; do not repeat record_unknown.";
   if (error instanceof UnknownRegistryError && error.reason === "not-found")
     return "The requested residual unknown does not exist in this session. Check the unknown_id and try again.";
+  if (error instanceof UnknownRegistryError && error.constraint !== undefined)
+    return describeResidualUnknownGraphConstraint(error.constraint);
   if (error instanceof UnknownRegistryError)
     return "Evidence state changed before the update completed. Refresh the current state and try again.";
   if (error instanceof ConfigurationError)

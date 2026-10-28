@@ -1,3 +1,4 @@
+import { cdpFrameRecordFacts } from "./CdpFrameIdentity.js";
 import type { InspectWebPageInput } from "../domain/browserObservation.js";
 import { sanitizeBrowserUrl } from "../domain/browserObservation.js";
 import type { WebPageInspection } from "../domain/browserObservationSchemas.js";
@@ -56,12 +57,13 @@ export const captureFrames = (
     completeness?.exclude("frames", "invalid_protocol_value", omittedCount),
   )) {
     const frame = recordValue(tree.frame);
-    const frameId = cdpStringValue(frame?.id);
+    const identity = cdpFrameRecordFacts(frame);
+    const frameId = identity.frameId;
     const observation = observeCdpFrameUrl(frame);
     const scopeUrl =
       observation.kind === "missing" ? undefined : observation.scopeUrl;
     const facts = classifyCdpFrameUrl(observation, allowedOrigins);
-    if (frame === undefined || frameId === undefined) {
+    if (frameId === null) {
       completeness?.exclude("frames", "invalid_protocol_value");
       continue;
     }
@@ -76,16 +78,15 @@ export const captureFrames = (
       continue;
     }
     if (maximum !== undefined && items.length >= maximum) continue;
-    const parentFrameId = cdpStringValue(frame.parentId);
     // Only the enclosing tree's root may legitimately omit parent evidence.
     if (
-      (tree !== root || Object.hasOwn(frame, "parentId")) &&
-      (parentFrameId === undefined || parentFrameId.length === 0)
+      identity.parentIssue !== null ||
+      (tree !== root && identity.parentRelation === "root")
     )
       completeness?.exclude("frames", "invalid_protocol_value");
     items.push({
       frame_id: frameId,
-      parent_frame_id: parentFrameId ?? null,
+      parent_frame_id: identity.parentId,
       url: facts.url,
       origin: facts.origin,
     });
@@ -518,14 +519,24 @@ export const captureAccessibility = (
       );
       return [];
     }
-    const nodes: UnknownRecord[] = [];
+    const nodes: {
+      readonly nodeId: string;
+      readonly parentId: string | null;
+      readonly childIds: readonly string[];
+      readonly ignored: boolean;
+      readonly role: unknown;
+      readonly name: unknown;
+      readonly description: unknown;
+      readonly properties: unknown;
+    }[] = [];
     let malformedCount = 0;
     for (const entry of inventory) {
       const node = recordValue(entry);
+      const nodeId = cdpStringValue(node?.nodeId);
       if (
         node === undefined ||
-        cdpStringValue(node.nodeId) === undefined ||
-        cdpStringValue(node.nodeId)?.length === 0 ||
+        nodeId === undefined ||
+        nodeId.length === 0 ||
         typeof node.ignored !== "boolean"
       ) {
         malformedCount += 1;
@@ -537,17 +548,31 @@ export const captureAccessibility = (
         (parentId === undefined || parentId.length === 0)
       )
         malformedCount += 1;
+      const childIds = Array.isArray(node.childIds)
+        ? node.childIds.filter(
+            (childId): childId is string =>
+              typeof childId === "string" && childId.length > 0,
+          )
+        : [];
       if (
         node.childIds !== undefined &&
         (!Array.isArray(node.childIds) ||
-          node.childIds.some(
-            (childId) =>
-              cdpStringValue(childId) === undefined ||
-              cdpStringValue(childId)?.length === 0,
-          ))
+          childIds.length !== node.childIds.length)
       )
         malformedCount += 1;
-      nodes.push(node);
+      // Identity admission owns these facts. Projection and coverage consume
+      // the same parsed IDs, including usable siblings of malformed fields.
+      nodes.push({
+        nodeId,
+        parentId:
+          parentId === undefined || parentId.length === 0 ? null : parentId,
+        childIds,
+        ignored: node.ignored,
+        role: node.role,
+        name: node.name,
+        description: node.description,
+        properties: node.properties,
+      });
     }
     if (malformedCount > 0)
       options.completeness?.exclude(
@@ -557,12 +582,7 @@ export const captureAccessibility = (
       );
     return nodes;
   });
-  const nodeIds = new Set(
-    all.flatMap((node) => {
-      const nodeId = cdpStringValue(node.nodeId);
-      return nodeId === undefined ? [] : [nodeId];
-    }),
-  );
+  const nodeIds = new Set(all.map((node) => node.nodeId));
   let excludedFields = 0;
   const nodes = all.map((node) => {
     const captureText = (value: unknown): string | null => {
@@ -575,25 +595,20 @@ export const captureAccessibility = (
       return raw;
     };
     return {
-      node_id: cdpStringValue(node.nodeId) ?? "",
-      parent_id: cdpStringValue(node.parentId) ?? null,
+      node_id: node.nodeId,
+      parent_id: node.parentId,
       role: axText(node.role),
       name: captureText(node.name),
       description: captureText(node.description),
-      ignored: node.ignored === true,
+      ignored: node.ignored,
       states: accessibilityStates(node.properties),
     };
   });
   return {
     total: all.length,
     nodes,
-    hasUnobservedChildren: all.some(
-      (node) =>
-        Array.isArray(node.childIds) &&
-        node.childIds.some((childId) => {
-          const id = cdpStringValue(childId);
-          return id !== undefined && !nodeIds.has(id);
-        }),
+    hasUnobservedChildren: all.some((node) =>
+      node.childIds.some((childId) => !nodeIds.has(childId)),
     ),
     textCapture: {
       status: options.unavailable

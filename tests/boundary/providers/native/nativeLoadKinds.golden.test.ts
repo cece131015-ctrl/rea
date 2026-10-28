@@ -595,3 +595,61 @@ it.each([
   );
   expect(load.builds[0]?.tools).toEqual([{ name, version: "1.0" }]);
 });
+
+it("projects build tools from the retained ordered field facts", () => {
+  const load = parseOtoolLoadCommands(
+    withOtoolMachHeader(
+      [
+        "Load command 0",
+        "cmd LC_BUILD_VERSION",
+        "cmdsize 40",
+        "platform 1",
+        "minos 1.0",
+        "sdk 1.0",
+        "ntools 2",
+        "tool 1",
+        "",
+        "version 001",
+        "tool 99",
+        "version 0x10",
+        "",
+      ].join("\n"),
+    ),
+  );
+  expect(load.builds[0]?.tools).toEqual([
+    { name: "CLANG", version: "001" },
+    { name: "99", version: "0x10" },
+  ]);
+  expect(load.commands[0]?.fields).toMatchObject({
+    "tool #1": 1,
+    "tool #2": 99,
+    "version #1": 1,
+    "version #2": 16,
+  });
+});
+
+it.each([
+  ["version 9.0", "tool 1", "version 1.0"],
+  ["tool 1", "version 1.0", "tool 2"],
+  ["tool 1", "version 1.0", "version 2.0"],
+  ["tool 1", "unexpected 2", "version 1.0"],
+  ["tool 1", "version"],
+])("rejects unpaired build tool/version facts: %j", (...toolRows) => {
+  expect(() =>
+    parseOtoolLoadCommands(
+      withOtoolMachHeader(
+        [
+          "Load command 0",
+          "cmd LC_BUILD_VERSION",
+          "cmdsize 32",
+          "platform 1",
+          "minos 1.0",
+          "sdk 1.0",
+          "ntools 1",
+          ...toolRows,
+          "",
+        ].join("\n"),
+      ),
+    ),
+  ).toThrow(/otool build.tool/u);
+});

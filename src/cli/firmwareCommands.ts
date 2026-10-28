@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { FirmwareAnalysisService } from "../application/firmware/FirmwareAnalysisService.js";
 import { createFirmwareAnalysisProvider } from "../composition/firmware.js";
@@ -36,7 +37,7 @@ export const registerFirmwareCommands = (
           operation === "inspect_firmware_regions" ? "binwalk" : "unblob",
           operation,
           signal,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
     );
   const path = localPathStringSchema.describe(

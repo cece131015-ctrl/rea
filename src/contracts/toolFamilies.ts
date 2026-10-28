@@ -49,17 +49,7 @@ import {
   WEBSITE_CLONE_TOOL_CONTRACTS,
 } from "./cloneToolContracts.js";
 import { TOOL_CONTRACTS } from "./toolContracts.js";
-import {
-  isToolFamilyId,
-  TOOL_FAMILY_IDS,
-  type ToolFamilyId,
-} from "./toolFamilyIds.js";
-
-export {
-  isToolFamilyId,
-  TOOL_FAMILY_IDS,
-  type ToolFamilyId,
-} from "./toolFamilyIds.js";
+import { TOOL_FAMILY_IDS, type ToolFamilyId } from "./toolFamilyIds.js";
 
 /** One selectable family: a stable selection id and its complete contract set. */
 export interface ToolFamilyDefinition {

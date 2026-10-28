@@ -308,7 +308,7 @@ const parseLoadCommand = (block: string, state: ParsedLoadCommands): void => {
     fields,
   });
   collectEntrypoint(kind, fields, state);
-  collectBuild(kind, block, fields, state);
+  collectBuild(kind, parsed, state);
   collectDependency(kind, fields, state);
   if (PAYLOAD_DEPENDENCY_COMMANDS.has(kind))
     state.omittedDependencyCommands.push(kind);
@@ -387,12 +387,12 @@ const collectEntrypoint = (
 
 const collectBuild = (
   kind: string,
-  block: string,
-  fields: Readonly<Record<string, string | number | null>>,
+  parsed: ParsedFields,
   state: ParsedLoadCommands,
 ): void => {
+  const fields = parsed.values;
   if (kind === "LC_BUILD_VERSION") {
-    const tools = parseBuildTools(block);
+    const tools = parseBuildTools(parsed.rows);
     if (numberField(fields, "ntools") !== tools.length)
       throw new TypeError("otool build-tool count does not match ntools");
     state.builds.push({
@@ -517,8 +517,6 @@ const parseField = (rawLine: string): readonly [string, string] | undefined => {
   // exactly, including surrounding spaces, under otool's ordinal label.
   const option = /^\s*(string #[1-9]\d*)(?: (.*))?$/u.exec(rawLine);
   if (option?.[1] !== undefined) return [option[1], option[2] ?? ""];
-  const fixedName = /^\s*(segname|sectname) (.*)$/u.exec(rawLine);
-  if (fixedName?.[1] !== undefined) return [fixedName[1], fixedName[2] ?? ""];
   const line = rawLine.trim();
   // These are the compound field labels used by otool. Keeping this list
   // explicit prevents a one-word field value such as `sectname version` from
@@ -586,16 +584,23 @@ const parseSections = (block: string): ParsedSection[] =>
       };
     });
 
+/** Project tool/version pairs from the same ordered facts as command fields. */
 const parseBuildTools = (
-  block: string,
+  rows: ParsedFields["rows"],
 ): Array<{ name: string; version: string }> => {
   const tools: Array<{ name: string; version: string }> = [];
-  const lines = block.split(/\r?\n/u).map((line) => line.trim());
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const tool = /^tool\s+(.+)$/u.exec(lines[index] ?? "")?.[1];
-    const version = /^version\s+(.+)$/u.exec(lines[index + 1] ?? "")?.[1];
-    if (tool !== undefined && version !== undefined)
-      tools.push({ name: BUILD_TOOL_NAMES.get(tool) ?? tool, version });
+  for (let index = 0; index < rows.length; index++) {
+    const field = rows[index];
+    if (field?.[0] === "version")
+      throw new TypeError("otool build-tool version has no preceding tool");
+    if (field?.[0] !== "tool") continue;
+    const version = rows[++index];
+    if (field[1] === "" || version?.[0] !== "version" || version[1] === "")
+      throw new TypeError("otool build tool is missing its name or version");
+    tools.push({
+      name: BUILD_TOOL_NAMES.get(field[1]) ?? field[1],
+      version: version[1],
+    });
   }
   return tools;
 };

@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { inspectSignalDecodersInputSchema } from "../domain/signals/signalDecoders.js";
 import { z } from "incur";
 import type { SignalRecordingService } from "../application/signals/SignalRecordingService.js";
@@ -64,7 +65,7 @@ export const registerSignalCommands = (
             "sigrok-recording",
             "inspect_signal_decoders",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });
@@ -119,7 +120,7 @@ export const registerSignalCommands = (
             "sigrok-recording",
             "decode_signal_recording",
             signal,
-          );
+          ).then(projectCliAnalysisResult);
         }),
       ),
   });

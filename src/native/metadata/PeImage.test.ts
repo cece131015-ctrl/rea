@@ -3,6 +3,7 @@ import { readGoBinaryImage } from "../../go/GoBinaryImage.js";
 import { readPeImage } from "./PeImage.js";
 import { pe } from "../../domain/binaryTarget.fixture.js";
 import { BinaryFormatFailure } from "./BinaryContainer.js";
+import { readBinaryContainer } from "./readBinaryContainer.js";
 import {
   createGoBinaryFixture,
   setGoPeVirtualSize,
@@ -32,6 +33,20 @@ it("reports complete DOS MZ images as outside the PE reader", () => {
     "DOS MZ images are outside the supported ELF, PE and thin Mach-O formats",
   );
 });
+
+it.each(["NE", "LE", "LX"])(
+  "recognizes %s without requiring a PE COFF header",
+  (signature) => {
+    const bytes = pe(0x014c).subarray(0, 66);
+    bytes.write(signature, 64, "ascii");
+    expect(() => readBinaryContainer(bytes)).toThrow(
+      expect.objectContaining({
+        kind: "unsupported",
+        message: `${signature} images are outside the supported ELF, PE and thin Mach-O formats`,
+      }),
+    );
+  },
+);
 
 it.each([32, 64] as const)(
   "uses raw-size fallback for PE%d Go build-info and keeps RVA mappings intact",

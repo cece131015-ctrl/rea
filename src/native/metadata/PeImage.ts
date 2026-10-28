@@ -35,7 +35,6 @@ const peHeaderOffset = (reader: BinaryReader): number => {
   const limitation = mzWindowsHeaderLayoutLimitation(windowsHeader);
   if (limitation !== undefined)
     throw new BinaryFormatFailure("unsupported", limitation);
-  reader.range(pe, 24, "PE signature and COFF header");
   if (["NE", "LE", "LX"].includes(windowsHeader.signature))
     throw new BinaryFormatFailure(
       "unsupported",
@@ -46,6 +45,7 @@ const peHeaderOffset = (reader: BinaryReader): number => {
       "malformed",
       "PE signature is invalid or overlaps the DOS header",
     );
+  reader.range(pe, 24, "PE signature and COFF header");
   return pe;
 };
 

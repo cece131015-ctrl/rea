@@ -119,6 +119,9 @@ export const findAppBundleResourceRoot = async (
     options.cwd === undefined ? {} : { cwd: options.cwd },
   );
   try {
+    // Admit the selected spelling before Darwin realpath can collapse file/..
+    // into a different, otherwise valid bundle resource root.
+    await stat(callerPath);
     const canonicalInput = await realpath(callerPath);
     const directLayout = await presentLayout(canonicalInput);
     const wrapped =

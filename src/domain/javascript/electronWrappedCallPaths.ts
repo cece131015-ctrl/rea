@@ -50,6 +50,7 @@ import {
   type ElectronStatementFallthrough,
 } from "./electronCallPathBlockPrefixes.js";
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
+import { javascriptSourceRangeKey } from "./javascriptSourceCoordinates.js";
 
 const callLabel = (node: t.Node): string =>
   t.isSequenceExpression(node)
@@ -57,7 +58,12 @@ const callLabel = (node: t.Node): string =>
     : calleeName(node) || "local call";
 
 const ipcEndpointKey = (value: ElectronIpcFinding): string =>
-  JSON.stringify([value.side, value.operation, value.channel, value.location]);
+  JSON.stringify([
+    value.side,
+    value.operation,
+    value.channel,
+    javascriptSourceRangeKey(value.location),
+  ]);
 
 /** Duplicate evidence already recorded for one endpoint and call site. */
 interface IpcEndpointFacts {
@@ -78,8 +84,10 @@ interface ReachedChain {
   readonly slot: number;
 }
 
-const ipcInvocationKey = (location: unknown): string =>
-  String(JSON.stringify(location));
+const ipcInvocationKey = (
+  location: ElectronIpcFinding["invocation_location"],
+): string =>
+  location === undefined ? "undefined" : javascriptSourceRangeKey(location);
 
 /** A finding's facts apart from which entry invoked it. */
 const ipcValueKey = (value: ElectronIpcFinding): string =>
@@ -131,7 +139,11 @@ const priorPath = (
 
 /** One physical IPC operation, independent of how its channel was resolved. */
 const ipcSiteKey = (value: ElectronIpcFinding): string =>
-  JSON.stringify([value.side, value.operation, value.location]);
+  JSON.stringify([
+    value.side,
+    value.operation,
+    javascriptSourceRangeKey(value.location),
+  ]);
 
 const indexIpcFinding = (
   index: Map<string, IpcEndpointFacts>,
@@ -534,7 +546,7 @@ export function* collectElectronWrappedCallPathsSteps(
         value.api_key !== null &&
         value.api_status === "object-literal" &&
         value.unknown_members === 0
-          ? [JSON.stringify(value.location)]
+          ? [javascriptSourceRangeKey(value.location)]
           : [],
       ),
     );
@@ -739,7 +751,8 @@ export function* collectElectronWrappedCallPathsSteps(
     const channel = first.value;
     const location = range(node);
     const invocationLocation =
-      JSON.stringify(range(context.entryNode)) === JSON.stringify(location)
+      javascriptSourceRangeKey(range(context.entryNode)) ===
+      javascriptSourceRangeKey(location)
         ? undefined
         : range(context.entryNode);
     const findingContext = {
@@ -946,7 +959,11 @@ export function* collectElectronWrappedCallPathsSteps(
         ? undefined
         : argumentNode(node.arguments[exposure.worldIdIndex]);
     // Absent when complete direct syntax leaves substitution nothing to add.
-    const site = bridgeSiteAt(node, JSON.stringify(location), worldNode);
+    const site = bridgeSiteAt(
+      node,
+      javascriptSourceRangeKey(location),
+      worldNode,
+    );
     // The site evaluated in its own scope is not an invocation; a traced call
     // that leaves this exposure unresolved keeps the syntax observation.
     const unresolved = (): void => {
@@ -1122,7 +1139,7 @@ export function* collectElectronWrappedCallPathsSteps(
         value,
       }));
     const findings = accumulator.contextBridgeApis.flatMap((entry) => {
-      const siteKey = JSON.stringify(entry.value.location);
+      const siteKey = javascriptSourceRangeKey(entry.value.location);
       const site = sites.get(siteKey);
       if (site === undefined) return [entry];
       sites.delete(siteKey);

@@ -44,11 +44,13 @@ const { closeCliJavaScriptResources, createCli } =
   await import("../../../dist/cli-runtime/cli.js");
 const { createCliResultOutput } =
   await import("../../../dist/cli-runtime/cliResultOutput.js");
-const { cliCompletionShell, splitIncurBuiltinArguments } =
-  await import("../../../dist/cli-runtime/cliBuiltinArguments.js");
+const {
+  cliCompletionShell,
+  normalizeCliArguments,
+  splitIncurBuiltinArguments,
+} = await import("../../../dist/cli-runtime/cliBuiltinArguments.js");
 const {
   cliConfigurationError,
-  normalizeCliArguments,
   renderCliOutputArgumentError,
   renderEmptyFilteredCliOutput,
   parseCliOutputArguments,

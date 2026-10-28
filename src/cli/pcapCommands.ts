@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { PcapAnalysisService } from "../application/pcap/PcapAnalysisService.js";
 import type { PcapAnalysisPort } from "../application/pcap/PcapAnalysisPort.js";
@@ -27,7 +28,7 @@ export const registerPcapCommands = (
           "pcap",
           operation,
           signal,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
     );
 

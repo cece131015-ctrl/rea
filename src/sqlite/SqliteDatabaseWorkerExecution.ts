@@ -1,3 +1,4 @@
+import { safeParseUtf8Json } from "../domain/safeJson.js";
 import {
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
@@ -269,7 +270,9 @@ export const executeSqliteDatabaseWorker = async (request: {
       finalization = sqliteReplyCompletionFailure(cause, capturedOutput);
       file = completed;
     }
-    reply = replySchema.parse(JSON.parse(file.bytes.toString("utf8")));
+    const decoded = safeParseUtf8Json(file.bytes);
+    if (!decoded.ok) throw decoded.cause;
+    reply = replySchema.parse(decoded.value);
   } catch (cause: unknown) {
     throw sqliteReplyFinalizationFailure(
       sqliteReplyReadFailure(cause, capturedOutput),

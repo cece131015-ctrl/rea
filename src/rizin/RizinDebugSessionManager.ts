@@ -1186,6 +1186,10 @@ export class RizinDebugSessionManager {
           platform: this.#platform,
         }),
       )
+      .catch((cause: unknown) => ({
+        status: "incomplete" as const,
+        reason: `Owned Rizin debugger shutdown failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      }))
       .then((stopped) => {
         if (stopped.status !== "incomplete") {
           for (const failure of session.cleanupFailures)

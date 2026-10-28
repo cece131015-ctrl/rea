@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { inspectDevicetreeInputSchema } from "../domain/firmware/devicetree.js";
 import { inspectPeLoadConfigInputSchema } from "../domain/native/peLoadConfig.js";
 import { inspectByteEntropyInputSchema } from "../domain/native/byteEntropy.js";
@@ -76,7 +77,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-elf-notes",
               "inspect_elf_notes",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });
@@ -120,7 +121,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-apple-ips",
               "inspect_apple_ips",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });
@@ -157,7 +158,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-kernel-module",
               "inspect_kernel_module",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });
@@ -192,7 +193,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-pe-load-config",
               "inspect_pe_load_config",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });
@@ -230,7 +231,7 @@ export const registerBinaryDiagnosticsCommands = (
             "rea-byte-entropy",
             "inspect_byte_entropy",
             signal,
-          );
+          ).then(projectCliAnalysisResult);
         }),
       ),
   });
@@ -265,7 +266,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-pe-certificates",
               "inspect_pe_certificates",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });
@@ -300,7 +301,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-pe-imports",
               "inspect_pe_imports",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });
@@ -335,7 +336,7 @@ export const registerBinaryDiagnosticsCommands = (
               "rea-pe-resources",
               "inspect_pe_resources",
               signal,
-            ),
+            ).then(projectCliAnalysisResult),
         );
       }),
   });

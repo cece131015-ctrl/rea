@@ -22,6 +22,8 @@ import type {
 } from "../domain/analysisErrorBase.js";
 
 export interface ArtifactReaderFailureOptions extends ErrorOptions {
+  /** Recovery guidance established by the producing adapter, separate from diagnostics. */
+  readonly userMessage?: string | undefined;
   readonly cancellation?: { readonly reason: unknown } | undefined;
   readonly cleanup?: AnalysisCleanupObservation | undefined;
   /** Exact authority for all reported cleanup; undefined leaves ownership unknown. */
@@ -175,8 +177,13 @@ export interface ArtifactReader {
     | ZipPackageFormat
     | "asar"
     | "godot-pck"
+    | "unityfs"
+    | "uimage"
     | "pyinstaller"
     | "node-sea"
+    | "intel-hex"
+    | "srec"
+    | "esp-image"
     | "file";
   entries(
     signal?: AbortSignal,
@@ -195,6 +202,7 @@ export interface ArtifactReader {
 
 /** Typed adapter failure translated at provider boundary. */
 export class ArtifactReaderFailure extends Error {
+  readonly userMessage: string | undefined;
   readonly cancellation: { readonly reason: unknown } | undefined;
   readonly cleanup: AnalysisCleanupObservation | undefined;
   readonly cleanupLeases: readonly AnalysisCleanupLease[] | undefined;
@@ -219,6 +227,7 @@ export class ArtifactReaderFailure extends Error {
   ) {
     super(message, options);
     this.name = "ArtifactReaderFailure";
+    this.userMessage = options?.userMessage;
     this.cancellation =
       reason === "cancelled"
         ? (options?.cancellation ?? { reason: options?.cause })
@@ -269,6 +278,7 @@ export class ArtifactReaderFailure extends Error {
       primary.message,
       {
         cause: primary,
+        userMessage: primary.userMessage,
         cancellation: primary.cancellation,
         cleanup: combineCleanup(primary.cleanup, cleanup),
         cleanupLeases:
@@ -332,3 +342,17 @@ export const artifactPrimaryCleanupLeases = (
     : cause instanceof AnalysisError && cause.cleanupIncomplete
       ? undefined
       : [];
+
+/** Known member identities whose content cannot be read; never a reader shutdown. */
+export class ArtifactEntryContentUnavailable extends ArtifactReaderFailure {
+  readonly traversal: ArtifactReaderTraversal | undefined;
+  constructor(
+    message: string,
+    readonly limitation: string,
+    options?: ErrorOptions & { readonly traversal?: ArtifactReaderTraversal },
+    details?: ArtifactIntegrityDetails,
+  ) {
+    super("unavailable", message, options, details);
+    this.traversal = options?.traversal;
+  }
+}

@@ -425,7 +425,7 @@ const stdioMode = (
   if (lookup.status === "missing")
     return unsetStdioMode(expression, method, context);
   if (lookup.status !== "explicit") return "dynamic";
-  const value = unwrapJavaScriptExpression(lookup.property.value).node;
+  const value = unwrapJavaScriptExpression(lookup.value).node;
   if (context.isNullish(value))
     return unsetStdioMode(expression, method, context);
   if (t.isStringLiteral(value)) return value.value;
@@ -449,7 +449,7 @@ const unsetStdioMode = (
   const silent = staticObjectProperty(options, "silent", context.isNullish);
   if (silent.status === "missing") return "default";
   if (silent.status !== "explicit") return "dynamic";
-  const value = unwrapJavaScriptExpression(silent.property.value).node;
+  const value = unwrapJavaScriptExpression(silent.value).node;
   if (context.isNullish(value)) return "default";
   const truthy = staticJavaScriptTruthiness(value);
   if (truthy === undefined) return "dynamic";

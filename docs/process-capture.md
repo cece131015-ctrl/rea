@@ -224,7 +224,30 @@ child output. Child output remains in the capture Evidence on stdout.
 resource limits, and normalization settings have defaults; see
 `processScenarioSchema` for the exact contract. Event times are milliseconds
 from launch, must be ordered, and must fall within `timeout_ms`. Inputs marked
-`sensitive` are sent to the process but persisted as a byte-count placeholder.
+`sensitive` are sent to the process but persisted with empty `data`,
+`sensitive: true`, and `input_bytes`. Exact nonempty CR/LF-separated input
+literals are removed from retained terminal text, including cross-chunk and
+VT-styled echoes. Rendering uses that redacted stream, so intermediate terminal
+states and serialized state cannot restore removed bytes. Normalized text is
+checked again. Encoded, transformed, or arbitrarily edited values are not a
+secret-detection contract; their privacy remains unknown. Unmarked inputs and
+caller-selected environment values remain evidence.
+
+The capture-local matcher admits at most 65,536 prefix states and 8,388,608
+construction work units. Projection uses at most 32 MiB of reusable position
+indexes and 67,108,864 work units across one capture. Capacity failures return a
+non-retryable resource error and withhold terminal text in partial observations.
+If output admission leaves gaps, the sensitive capture withholds retained
+terminal text rather than interpreting separated fragments as a complete stream.
+`raw_terminal.redacted_bytes` reports bytes removed from admitted original
+chunks; these bytes still consume `output_bytes` alongside retained safe bytes.
+Private display effects remain unknown, with frame order and provenance retained.
+
+This changes the sensitive-input Evidence representation: consumers of the old
+`<redacted-input:N-bytes>` placeholder must read `input_bytes` instead. Existing
+saved captures remain readable and are not rewritten; old files may still
+contain previously echoed input. A private-input comparison policy version
+separates old and new captures; reacquire both sides for comparable observations.
 Environment overrides are recorded in the scenario commitment; inherited
 values are not copied into Evidence.
 
@@ -294,7 +317,8 @@ own classification until its exact resources are released.
 
 Terminal frame `data` is the comparison text after the selected normalization.
 New captures also preserve `raw_data` when normalization changes a PTY chunk;
-otherwise `data` is already the original text. Older captures may lack the
+otherwise `data` is already that text. For sensitive captures, both fields
+contain only the safe projection; no unredacted backup is retained. Older captures may lack the
 original text for changed chunks. Both values participate in Evidence identity,
 while comparisons and trace assertions use the normalized text. Retaining the
 original adds at most `limits.output_bytes` of text, because it comes from the
@@ -500,6 +524,11 @@ Every capture requires `truncation_details`, with separate accounting for:
   An unreadable directory is recorded in `enumeration_omissions` with its
   root-aliased path and operating-system error code. Entries observed before
   that directory remain available, while descendants beneath it stay unknown.
+  A basename that is not valid UTF-8 is never looked up through replacement
+  characters. It consumes entry capacity and records an `unrepresentable_name`
+  omission at its containing directory, with exact basename bytes in
+  `raw_name_hex` and a null `system_code`. That root's enumeration remains
+  incomplete, so missing paths beneath it remain unknown.
   Each retained regular file without a digest has an aliased path, size,
   remaining budget and reason: `file_bytes_budget`,
   `file_changed_or_short_read`, or `file_unavailable`. Its `system_code` is
@@ -663,3 +692,11 @@ REA then preserves ownership uncertainty and can report `cleanup_incomplete`;
 it does not disable verification to continue. A sandbox that explicitly allows
 this read-only process inspector is a separate prerequisite from the compiler
 and cache settings.
+
+Symlink observations preserve their stored target bytes in `symlink_target_hex`
+(lowercase hexadecimal). `symlink_target` retains valid UTF-8 text and is `null`
+when the target bytes cannot be decoded as UTF-8. Filesystem effects compare
+these exact bytes without resolving the link. Older captures without the hex
+field still parse; a legacy target containing U+FFFD has ambiguous byte identity,
+so matching target text alone produces an `unknown` effect. Symlink descendants
+remain outside filesystem observation regardless of target encoding.

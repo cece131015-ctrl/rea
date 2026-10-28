@@ -225,10 +225,16 @@ describe("compiled Interface Builder traversal coverage", () => {
         expect.objectContaining({
           facet: "archive_decode",
           status: "partial",
-          reason: "document_limit_reached",
+          reason: "multiple_archive_decode_causes",
           examined: 1,
           omitted: 126,
         }),
+      );
+      expect(result.limitations).toContain(
+        "61 Interface Builder archive(s) omitted because max documents.",
+      );
+      expect(result.limitations).toContain(
+        "65 Interface Builder archive(s) omitted because symlink not followed.",
       );
       const reasons = result.limitations.filter((value) =>
         value.includes(": omitted because "),
@@ -745,8 +751,10 @@ describe("bounded Interface Builder archive decoding", () => {
       }
     },
   );
+});
 
-  it("marks repeated NIB hierarchy references partial at the caller object limit", async () => {
+describe("bounded Interface Builder hierarchy and value expansion", () => {
+  it("deduplicates repeated NIB links while reporting the unavailable owner registry", async () => {
     const root = await createTestTempDirectory("rea-ib-repeated-hierarchy-");
     const bundle = join(root, "Example.app");
     await mkdir(bundle, { recursive: true });
@@ -794,6 +802,7 @@ describe("bounded Interface Builder archive decoding", () => {
         facet: "hierarchy:RepeatedHierarchy.nib",
         status: "partial",
         reason: "serialized_view_hierarchy_incomplete",
+        omitted: 1,
       }),
     );
   });

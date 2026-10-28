@@ -463,6 +463,7 @@ export const normalizeRetainedTerminalFrames = (
     maxBytes: number,
   ) => BoundedProcessTextNormalization,
   maximumBytes: number,
+  reason: "sampled-identifiers" | "sensitive-input" = "sampled-identifiers",
 ): number => {
   let bytes = 0;
   const projected: TerminalFrame[] = [];
@@ -473,11 +474,14 @@ export const normalizeRetainedTerminalFrames = (
       throw new AnalysisResourceConstraintError(
         "capture_process",
         "capacity",
-        "Retained terminal text exceeded the selected output budget after sampled PID normalization.",
+        `Retained terminal text exceeded the selected output budget after ${reason} projection.`,
         {
           maximum_output_bytes: maximumBytes,
           frame_index: frame.sequence,
-          boundary: "terminal-pid-normalization",
+          boundary:
+            reason === "sampled-identifiers"
+              ? "terminal-pid-normalization"
+              : "terminal-sensitive-input-normalization",
         },
         {
           retryable: false,

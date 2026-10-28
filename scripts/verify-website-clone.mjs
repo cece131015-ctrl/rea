@@ -113,7 +113,9 @@ try {
     { env: { ...process.env, REA_LOG_LEVEL: "silent" }, maxBuffer: 64 << 20 },
   );
   const cliElapsed = Math.round(performance.now() - started);
-  await verifyClone(cliOutput, JSON.parse(stdout).normalized_result);
+  const cli = JSON.parse(stdout);
+  assert.equal(cli.ok, true, stdout.slice(0, 2000));
+  await verifyClone(cliOutput, cli.value.normalized_result);
 
   const client = new Client({
     name: "rea-website-clone-verifier",

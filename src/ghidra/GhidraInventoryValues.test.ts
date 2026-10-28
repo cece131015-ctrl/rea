@@ -6,6 +6,47 @@ import {
   parseGhidraInventoryResult,
 } from "./GhidraInventoryValues.js";
 
+it.each(["search_procedures", "search_strings"] as const)(
+  "%s retains bridge document selection and native search defaults",
+  (operation) => {
+    for (const selection of [{}, { document: null }, { document: "fixture" }]) {
+      expect(
+        parseGhidraInventoryInput(operation, {
+          pattern: "entry",
+          ...selection,
+        }),
+      ).toEqual({
+        ok: true,
+        value: {
+          pattern: "entry",
+          mode: "literal",
+          case_sensitive: false,
+          document: selection.document ?? null,
+        },
+      });
+    }
+    expect(
+      parseGhidraInventoryInput(operation, { pattern: "entry", document: "" })
+        .ok,
+    ).toBe(false);
+    expect(
+      parseGhidraInventoryInput(operation, {
+        pattern: "Entry.*",
+        mode: "regex",
+        case_sensitive: true,
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        pattern: "Entry.*",
+        mode: "regex",
+        case_sensitive: true,
+        document: null,
+      },
+    });
+  },
+);
+
 it.each(["other", 42, null, {}])(
   "rejects an invalid own destination with value %j before admitting any batch naming subset",
   (value) => {

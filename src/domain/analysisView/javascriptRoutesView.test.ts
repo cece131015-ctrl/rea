@@ -179,7 +179,7 @@ it("checks subject identity again after warming an immutable parent", () => {
       subject: {
         name: "app",
         local_path: "/different",
-        digest: { sha256: "c".repeat(64) },
+        digest: { sha256: "d".repeat(64) },
         format: "javascript-bundle",
         architecture: null,
       },

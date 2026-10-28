@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -13,6 +13,7 @@ import {
   cArchiveBytecodeExecutable,
   pyzArchive,
 } from "../../../src/artifacts/pyinstaller/CArchive.fixture.js";
+import { artifactExtractionResultSchema } from "../../../src/domain/artifactGraph.js";
 import { artifactInspectionResultSchema } from "../../../src/domain/artifactInspection.js";
 import { parseEvidence, type Evidence } from "../../../src/domain/evidence.js";
 import { analysisViewResultSchema } from "../../../src/domain/analysisView/analysisView.js";
@@ -569,6 +570,169 @@ it.each([
       await client.close();
       await server.close();
       await session.close();
+    }
+  },
+);
+
+const PYZ_ROLE_FILES = [
+  {
+    name: "mod.child",
+    typeCode: 0,
+    path: "mod/child.pyc",
+    body: Buffer.from("module-body"),
+    bytecode: true,
+  },
+  {
+    name: "pkg.inner",
+    typeCode: 1,
+    path: "pkg/inner/__init__.pyc",
+    body: Buffer.from("package-body"),
+    bytecode: true,
+  },
+  {
+    name: "assets/config.json",
+    typeCode: 2,
+    path: "assets/config.json",
+    body: Buffer.from('{"enabled":true}'),
+    bytecode: false,
+  },
+];
+
+it.each([false, true])(
+  "preserves PYZ member roles through MCP inventory and extraction (encryption marker=%s)",
+  async (encrypted) => {
+    const files = encrypted ? [] : PYZ_ROLE_FILES;
+    const directory = await createTestTempDirectory("rea-pyz-roles-mcp-");
+    const path = join(directory, "roles");
+    await writeFile(
+      path,
+      cArchiveExecutable({
+        layout: "2.1",
+        pythonVersion: 309,
+        members: [
+          ...(encrypted
+            ? [
+                {
+                  name: "pyimod00_crypto_key",
+                  typeCode: "m",
+                  payload: Buffer.from("key module"),
+                  compress: false,
+                },
+              ]
+            : []),
+          {
+            name: "PYZ.pyz",
+            typeCode: "z",
+            compress: false,
+            payload: pyzArchive({
+              magic: PYTHON_39_MAGIC,
+              modules: [
+                ...files,
+                {
+                  name: "ns.branch",
+                  typeCode: 3,
+                  body: Buffer.from("legacy namespace payload"),
+                  legacyNamespacePayload: true,
+                },
+                { name: "empty.branch", typeCode: 3, body: Buffer.alloc(0) },
+              ],
+            }),
+          },
+        ],
+      }),
+    );
+    const session = await createArtifactBinarySession(process.env);
+    const server = createServer({ kind: "session", session });
+    const client = new Client({ name: "pyz-role-test", version: "1" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    let outputRoot: string | undefined;
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      expect(
+        (await client.callTool({ name: "open_binary", arguments: { path } }))
+          .isError,
+      ).not.toBe(true);
+      const reply = await client.callTool({
+        name: "inspect_artifact",
+        arguments: {},
+      });
+      expect(reply.isError).not.toBe(true);
+      const inventory = artifactInspectionResultSchema.parse(
+        parseEvidence(reply.structuredContent).normalized_result,
+      ).substeps[0]?.evidence.normalized_result;
+      for (const [name, payload] of [
+        ["ns/branch", true],
+        ["empty/branch", false],
+      ] as const) {
+        expect(
+          inventory?.occurrences.find(
+            (row) => row.logical_path === `PYZ.pyz/${name}`,
+          ),
+        ).toMatchObject({
+          entry_kind: "metadata",
+          artifact_kind: "package-metadata",
+          artifact_id: null,
+          encrypted: encrypted && payload,
+          format_metadata: {
+            type_code: 3,
+            bytecode_header: "not-bytecode",
+            bytecode_magic: null,
+            encryption_source: encrypted && payload ? "carchive-marker" : null,
+          },
+        });
+      }
+      const extracted = await client.callTool({
+        name: "extract_artifact",
+        arguments: {},
+      });
+      expect(extracted.isError).not.toBe(true);
+      const result = artifactExtractionResultSchema.parse(
+        parseEvidence(extracted.structuredContent).normalized_result,
+      );
+      outputRoot = result.output_root;
+      for (const file of files) {
+        const logicalPath = `PYZ.pyz/${file.path}`;
+        expect(
+          inventory?.occurrences.find(
+            (row) => row.logical_path === logicalPath,
+          ),
+        ).toMatchObject({
+          entry_kind: "file",
+          format_metadata: {
+            type_code: file.typeCode,
+            source_name: file.name,
+            bytecode_header: file.bytecode ? "derived" : "not-bytecode",
+          },
+        });
+        const expected = file.bytecode
+          ? Buffer.concat([PYTHON_39_MAGIC, Buffer.alloc(12), file.body])
+          : file.body;
+        expect(
+          (await readFile(join(outputRoot, logicalPath))).equals(expected),
+        ).toBe(true);
+        expect(
+          result.artifacts.find((item) => item.relative_path === logicalPath)
+            ?.sha256,
+        ).toBe(createHash("sha256").update(expected).digest("hex"));
+      }
+      for (const namespace of ["ns/branch", "empty/branch"]) {
+        expect(
+          result.artifacts.some(
+            (item) => item.relative_path === `PYZ.pyz/${namespace}`,
+          ),
+        ).toBe(false);
+        await expect(
+          access(join(outputRoot, "PYZ.pyz", namespace)),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      await client.close();
+      await server.close();
+      await session.close();
+      if (outputRoot !== undefined)
+        await rm(outputRoot, { recursive: true, force: true });
     }
   },
 );

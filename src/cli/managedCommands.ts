@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 
 import { compareManagedMemberPaths } from "../application/managed/ManagedMemberComparisonService.js";
@@ -44,7 +45,12 @@ const registerInspectManagedArtifact = (
     }),
     run: ({ args }) =>
       logCliCommand(logger, "inspect-managed-artifact", () =>
-        runProviderAnalysis(args.path, "inspect_managed_artifact", {}, logger),
+        runProviderAnalysis(
+          args.path,
+          "inspect_managed_artifact",
+          {},
+          logger,
+        ).then(projectCliAnalysisResult),
       ),
   });
 };
@@ -90,7 +96,7 @@ const registerInspectManagedMembers = (
                 ? {}
                 : { evidenceBundlePath: options.evidenceBundle }),
             },
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });
@@ -114,7 +120,7 @@ const registerInspectManagedNativeBoundaries = (
           "inspect_managed_native_boundaries",
           {},
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
 };
@@ -152,9 +158,9 @@ const registerCompareManagedMembers = (
             signal,
             "Managed member comparison resources",
           );
-          return "evidence_id" in result
-            ? result
-            : { error: "Managed member comparison failed", ...result };
+          return result.ok
+            ? result.value
+            : { error: "Managed member comparison failed", ...result.error };
         }),
       ),
   });

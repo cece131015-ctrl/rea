@@ -451,3 +451,118 @@ it.each(["10", "DSYM", "2"])(
     });
   },
 );
+
+describe("dSYM diagnostic admission", () => {
+  const diagnostic =
+    "section '__TEXT/__text' has offset=0 but is not a zero-fill section type";
+
+  it.each([
+    { name: "stdout refusal", stdout: diagnostic, stderr: "", accepted: true },
+    { name: "stderr refusal", stdout: "", stderr: diagnostic, accepted: true },
+    {
+      name: "echoed path and prefixed refusal",
+      stdout: `/fixture/debug-companion:\n\ndyld_info: ${diagnostic}\n`,
+      stderr: "",
+      accepted: true,
+    },
+    {
+      name: "unrelated stdout after refusal",
+      stdout: `${diagnostic}\nmalformed load command`,
+      stderr: "",
+      accepted: false,
+    },
+    {
+      name: "unrelated stdout before refusal",
+      stdout: `malformed load command\n${diagnostic}`,
+      stderr: "",
+      accepted: false,
+    },
+    {
+      name: "unrelated stderr beside stdout refusal",
+      stdout: diagnostic,
+      stderr: "malformed load command",
+      accepted: false,
+    },
+    {
+      name: "unrelated stdout beside stderr refusal",
+      stdout: "malformed load command",
+      stderr: diagnostic,
+      accepted: false,
+    },
+    {
+      name: "unrelated stderr after refusal",
+      stdout: "",
+      stderr: `${diagnostic}\nmalformed load command`,
+      accepted: false,
+    },
+    {
+      name: "missing UUID before dSYM refusal",
+      stdout: `missing LC_UUID load command\n${diagnostic}`,
+      stderr: "",
+      accepted: false,
+    },
+    {
+      name: "missing UUID beside stderr dSYM refusal",
+      stdout: "missing LC_UUID load command",
+      stderr: diagnostic,
+      accepted: false,
+    },
+    {
+      name: "duplicate refusal across streams",
+      stdout: diagnostic,
+      stderr: diagnostic,
+      accepted: false,
+    },
+  ])("preserves $name", async ({ stdout, stderr, accepted }) => {
+    const runner = new NativeFixtureRunner({
+      otool: [
+        "Mach header",
+        "magic cputype cpusubtype caps filetype ncmds sizeofcmds flags",
+        "0xfeedfacf 16777228 0 0x00 10 0 0 0x0",
+      ].join("\n"),
+    });
+    const result = await inspectNativeMacho({
+      target: nativeMachoTarget("/fixture/debug-companion"),
+      run: async (tool, args, _signal, acceptNonZeroIf) => {
+        const captured = await runner.run(tool, args);
+        if (!captured.ok || tool !== "dyld_info") return captured;
+        const refused = {
+          ...captured.value,
+          stdout,
+          stderr,
+          stdoutBytes: Buffer.byteLength(stdout),
+          stderrBytes: Buffer.byteLength(stderr),
+          exitCode: 1,
+        };
+        return acceptNonZeroIf?.(refused)
+          ? ok(refused)
+          : err(
+              new AnalysisOutputError("inspect_macho", "native refusal", {
+                capturedOutput: {
+                  stdout,
+                  stderr,
+                  truncated: false,
+                  stdout_bytes: refused.stdoutBytes,
+                  stderr_bytes: refused.stderrBytes,
+                  exit_code: 1,
+                  signal: null,
+                },
+              }),
+            );
+      },
+      invocation: () => {
+        throw new Error("Refused target does not produce provenance");
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error._tag).toBe(
+      accepted ? "AnalysisUnsupportedTargetError" : "AnalysisOutputError",
+    );
+    expect(result.error.capturedOutput).toMatchObject({
+      stdout,
+      stderr,
+      exit_code: 1,
+    });
+  });
+});

@@ -188,9 +188,12 @@ it("stops and joins metadata discovery when the update host closes", async () =>
   const probing = host.installation();
   await ready;
   expect(child?.exitCode).toBeNull();
-  expect(await host.close?.()).toBeUndefined();
-  await probing;
+  expect(host.close).toBeTypeOf("function");
+  if (host.close === undefined) throw new Error("Missing update host close");
+  expect(await host.close()).toBeUndefined();
+  // Close must join the probe itself, not rely on the later probe deadline.
   expect(child?.signalCode).not.toBeNull();
+  await probing;
 });
 
 it("bounds a stalled metadata probe and keeps the runner usable", async () => {

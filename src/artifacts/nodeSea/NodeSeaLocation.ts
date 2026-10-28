@@ -17,7 +17,11 @@ import type { FileHandle } from "node:fs/promises";
 
 import { abortIfNeeded } from "../ArtifactHash.js";
 import { ArtifactReaderFailure } from "../ArtifactReader.js";
-import { readFatContainerHeader } from "../../domain/apple/machoContainer.js";
+import {
+  readFatContainerHeader,
+  readFatHeaderPrefix,
+  readMachoHeaderPrefixFacts,
+} from "../../domain/apple/machoContainer.js";
 import { readElfFixedHeader } from "../../domain/elfFixedHeader.js";
 import { readMachoLoadCommandTableHeader } from "../../domain/apple/machoLoadCommands.js";
 import {
@@ -51,9 +55,6 @@ const MAX_NOTE_NAME_BYTES = 4096;
 const FUSE_LENGTH = "NODE_SEA_FUSE_".length + 32 + 2;
 // PE header structures must fit this prefix for the bounded name probe.
 const PE_HEADER_PROBE_BYTES = 64 * 1024;
-
-const THIN_MAGICS = new Set([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe]);
-const FAT_MAGICS = new Set([0xcafebabe, 0xcafebabf, 0xbebafeca, 0xbfbafeca]);
 
 /** One injected blob inside a native carrier. Offsets are carrier file offsets. */
 export interface NodeSeaLocation {
@@ -96,11 +97,13 @@ export const locateNodeSea = async (
   const carrier: Carrier = { handle, fileSize, signal };
   const prefix = await readExact(carrier, 0, Math.min(fileSize, 64));
   if (prefix === undefined || prefix.length < 4) return undefined;
-  const magic = prefix.readUInt32BE(0);
-  if (THIN_MAGICS.has(magic) || FAT_MAGICS.has(magic)) {
-    const ranges = THIN_MAGICS.has(magic)
-      ? await locateThinMachO(carrier, 0, fileSize)
-      : await locateFatMachO(carrier, prefix);
+  const thin = readMachoHeaderPrefixFacts(prefix).format;
+  const fat = readFatHeaderPrefix(prefix);
+  if (thin !== null || fat.state === "incomplete" || fat.state === "parsed") {
+    const ranges =
+      thin !== null
+        ? await locateThinMachO(carrier, 0, fileSize)
+        : await locateFatMachO(carrier, prefix);
     return collapseRanges(carrier, "mach-o", ranges);
   }
   if (prefix.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])))
@@ -216,7 +219,7 @@ const locateFatMachO = async (
     header = readFatContainerHeader(bytes, carrier.fileSize);
   }
   if (header.state !== "parsed") {
-    if (bytes.length >= 4 && THIN_MAGICS.has(bytes.readUInt32BE(0)))
+    if (readMachoHeaderPrefixFacts(bytes).format !== null)
       return locateThinMachO(carrier, 0, carrier.fileSize);
     return [];
   }
@@ -269,22 +272,24 @@ const locateThinMachO = async (
     }
     if (cmd === LC_SEGMENT || cmd === LC_SEGMENT_64) {
       const segment64 = cmd === LC_SEGMENT_64;
-      const segmentHeader = segment64 ? 72 : 56;
       const sectionSize = segment64 ? 80 : 68;
-      const name = cString(commands, offset + 8, 16);
+      const parsedSegment = readMachoSegmentHeader(
+        commands.subarray(offset, offset + cmdsize),
+        segment64,
+        little,
+      );
+      // Incomplete segments cannot establish a SEA carrier. Interpret names
+      // and section framing only from the shared fixed-record observation.
+      const segment = parsedSegment.ok ? parsedSegment.value : undefined;
+      const name =
+        segment === undefined ? undefined : cString(segment.nameBytes, 0, 16);
       if (
-        (name === "NODE_SEA" || name === "__NODE_SEA") &&
-        cmdsize >= segmentHeader
+        segment !== undefined &&
+        (name === "NODE_SEA" || name === "__NODE_SEA")
       ) {
-        const parsedSegment = readMachoSegmentHeader(
-          commands.subarray(offset, offset + cmdsize),
-          segment64,
-          little,
-        );
-        if (!parsedSegment.ok)
-          throw formatFailure(NODE_SEA_MACHO_SEGMENT_TRUNCATED);
-        const nsects = parsedSegment.value.sectionCount;
-        const table = offset + parsedSegment.value.headerSize;
+        const segmentHeader = segment.headerSize;
+        const nsects = segment.sectionCount;
+        const table = offset + segmentHeader;
         if (
           nsects > Math.floor((cmdsize - segmentHeader) / sectionSize) ||
           table + nsects * sectionSize > offset + cmdsize
@@ -588,8 +593,9 @@ const locatePeResources = async (carrier: Carrier): Promise<BlobRange[]> => {
   if (bytes === undefined) throw formatFailure(NODE_SEA_TRUNCATED);
   // A native-looking file need not be an admitted PE image. Once the layout
   // is admitted, resource errors remain failures rather than inferred absence.
+  let layout: ReturnType<typeof readPeResourceLayout>;
   try {
-    readPeResourceLayout(bytes);
+    layout = readPeResourceLayout(bytes);
   } catch (cause) {
     if (cause instanceof ArtifactReaderFailure && cause.reason === "format")
       return [];
@@ -608,6 +614,7 @@ const locatePeResources = async (carrier: Carrier): Promise<BlobRange[]> => {
       max_entries: MAX_INSPECT_PE_DIRECTORY_ENTRIES,
     },
     carrier.signal,
+    layout,
   );
   return resources.resources.flatMap((resource) => {
     if (

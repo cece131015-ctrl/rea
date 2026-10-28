@@ -442,3 +442,131 @@ describe("clone_local_application safety", () => {
     expect((await readdir(root)).sort()).toEqual(["apps"]);
   });
 });
+
+describe("find_local_applications desktop entry installs", () => {
+  const desktopHost = async () => {
+    const root = await createTestTempDirectory("rea-local-apps-installs-");
+    const home = join(root, "home");
+    const share = join(home, ".local", "share");
+    const applications = join(share, "applications");
+    await mkdir(applications, { recursive: true });
+    const host: LocalApplicationHost = {
+      platform: "linux",
+      environment: { PATH: join(root, "none"), XDG_DATA_DIRS: join(root, "x") },
+      homeDirectory: home,
+    };
+    const entry = (name: string, exec: string) =>
+      writeFile(
+        join(applications, `${name}.desktop`),
+        `[Desktop Entry]\nType=Application\nName=${name}\nExec=${exec}\n`,
+      );
+    return { root, share, applications, host, entry };
+  };
+
+  it_(
+    "selects one product below a vendor directory, never the vendor directory",
+    async () => {
+      const { share, host, entry } = await desktopHost();
+      for (const product of ["browser", "browser-beta"]) {
+        await mkdir(join(share, "Vendor", product), { recursive: true });
+        await executable(join(share, "Vendor", product, "run"));
+        await entry(`Vendor ${product}`, join(share, "Vendor", product, "run"));
+      }
+      await mkdir(join(share, "Tool", "bin"), { recursive: true });
+      await executable(join(share, "Tool", "bin", "tool"));
+      await entry("Toolbox", join(share, "Tool", "bin", "tool"));
+      expect(
+        (await find(host, "vendor")).matches.map(({ root_path }) => root_path),
+      ).toEqual([
+        join(share, "Vendor", "browser"),
+        join(share, "Vendor", "browser-beta"),
+      ]);
+      expect((await find(host, "toolbox")).matches[0]?.root_path).toBe(
+        join(share, "Tool"),
+      );
+    },
+  );
+
+  it_(
+    "selects an interpreted application's file, not its interpreter",
+    async () => {
+      const { share, host, entry } = await desktopHost();
+      await mkdir(join(share, "pytool"), { recursive: true });
+      await writeFile(join(share, "pytool", "main.py"), "print(1)\n");
+      await entry("PyTool", `python3 -u ${join(share, "pytool", "main.py")}`);
+      await entry("Inline", 'sh -c "echo hi"');
+      expect((await find(host, "pytool")).matches[0]).toMatchObject({
+        root_path: join(share, "pytool"),
+        root_kind: "directory",
+        limitations: [expect.stringContaining("runs python3 on")],
+      });
+      expect((await find(host, "inline")).matches[0]).toMatchObject({
+        root_path: null,
+        limitations: [expect.stringContaining("inline sh command")],
+      });
+    },
+  );
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "keeps scanning a root past an unreadable subdirectory",
+    async () => {
+      const { applications, host, entry, share } = await desktopHost();
+      await mkdir(join(applications, "aa-locked"));
+      await chmod(join(applications, "aa-locked"), 0o000);
+      onTestFinished(() => chmod(join(applications, "aa-locked"), 0o755));
+      await mkdir(join(share, "late"), { recursive: true });
+      await executable(join(share, "late", "late"));
+      await entry("Late", join(share, "late", "late"));
+      const discovery = await find(host, "late");
+      expect(discovery.matches).toHaveLength(1);
+      expect(
+        discovery.roots.find(({ path }) => path === applications),
+      ).toMatchObject({ state: "partial" });
+      expect(discovery.coverage.status).toBe("partial");
+    },
+  );
+});
+
+describe("clone_local_application name selection", () => {
+  it_(
+    "states unverified uniqueness when a searched location was not read",
+    async () => {
+      const { root, apps, host, resources } = await cloneSetup();
+      await writeFile(join(root, "not-a-directory"), "x");
+      const result = await cloneLocalApplication(
+        {
+          application: "viewer",
+          output_directory: join(root, "copy"),
+          search_roots: [apps, join(root, "not-a-directory")],
+        },
+        { host, resources },
+      );
+      if (!result.ok) throw result.error;
+      expect(
+        localApplicationCloneSchema.parse(result.value.normalized_result)
+          .limitations,
+      ).toContainEqual(
+        expect.stringContaining("only among the locations read"),
+      );
+    },
+  );
+
+  it_("counts only exact candidates when several match exactly", async () => {
+    const { root, apps, host, resources } = await cloneSetup();
+    const second = join(root, "more");
+    await mkdir(join(second, "Viewer"), { recursive: true });
+    await writeFile(join(second, "Viewer", "viewer"), "other");
+    const result = await cloneLocalApplication(
+      {
+        application: "viewer",
+        output_directory: join(root, "copy"),
+        search_roots: [apps, second],
+      },
+      { host, resources },
+    );
+    if (result.ok) throw new Error("Expected an ambiguous exact name");
+    const message = JSON.stringify(projectAnalysisError(result.error));
+    expect(message).toContain("matches 2 applications exactly");
+    expect(message).not.toContain("; and ");
+  });
+});

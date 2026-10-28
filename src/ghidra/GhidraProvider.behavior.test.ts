@@ -4,7 +4,7 @@ import { GhidraNativeAotSnapshotOwner } from "./GhidraNativeAotSnapshotOwner.js"
 import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import { resolvedAnalysisError } from "../domain/analysisErrorBase.js";
 import { createDeferred } from "../../tests/fixtures/binarySession.js";
-import { ProviderInspectionScope } from "../providers/ProviderInspectionScope.js";
+import { ProviderInspectionScope } from "../application/ProviderInspectionScope.js";
 import { ok as javaProbeOk, err, ok } from "../domain/result.js";
 import type { GhidraJavaObservation } from "./GhidraJavaProbe.js";
 import type { GhidraSeedReport } from "./GhidraAnalysisSeeds.js";
@@ -4691,3 +4691,41 @@ it("keeps saved project reports as shared historical Evidence without applying f
     first.value.sourceEvidence?.[0],
   );
 });
+
+it.each(["search_procedures", "search_strings"] as const)(
+  "%s applies shared folding after validation and preserves native source rows",
+  async (operation) => {
+    const rows = [
+      { address: "0x1000", value: "ſource" },
+      { address: "0x1001", value: "SOURCE" },
+      { address: "0x1002", value: "İource" },
+      { address: "0x1003", value: "unrelated" },
+    ];
+    const ghidra = provider(installationHost(), () => ({
+      start: () => Promise.resolve(ok(sessionInfo())),
+      callTool: () => Promise.resolve(ok(jsonValueSchema.parse(rows))),
+      close: () => Promise.resolve(ok(null)),
+    }));
+    const client = await createElfClient(ghidra);
+    try {
+      const result = await client.execute(operation, { pattern: "source" });
+      if (!result.ok) throw result.error;
+      expect(result.value.result).toEqual(rows.slice(0, 2));
+      expect(result.value.rawResult).toEqual(rows);
+      const regex = await client.execute(operation, {
+        pattern: "source",
+        mode: "regex",
+      });
+      if (!regex.ok) throw regex.error;
+      expect(regex.value.result).toEqual(rows);
+      const sensitive = await client.execute(operation, {
+        pattern: "source",
+        case_sensitive: true,
+      });
+      if (!sensitive.ok) throw sensitive.error;
+      expect(sensitive.value.result).toEqual(rows);
+    } finally {
+      await client.close();
+    }
+  },
+);

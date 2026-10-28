@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { AnalysisInputError } from "../domain/analysisErrorCore.js";
 import { AdbDeviceAnalysisService } from "../application/adb/AdbDeviceAnalysisService.js";
@@ -33,7 +34,7 @@ export const registerAdbCommands = (
           "adb",
           operation,
           signal,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
     );
 

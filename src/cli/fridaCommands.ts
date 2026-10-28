@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 
 import { FridaInstrumentationService } from "../application/frida/FridaInstrumentationService.js";
@@ -96,7 +97,7 @@ export const registerFridaCommands = (
             "frida",
             "list_frida_devices",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });
@@ -135,7 +136,7 @@ export const registerFridaCommands = (
             "frida",
             "list_frida_processes",
             signal,
-          );
+          ).then(projectCliAnalysisResult);
         }),
       ),
   });
@@ -284,7 +285,7 @@ export const registerFridaCommands = (
             "frida",
             "instrument_with_frida",
             signal,
-          );
+          ).then(projectCliAnalysisResult);
         }),
       ),
   });

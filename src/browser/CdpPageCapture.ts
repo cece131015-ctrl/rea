@@ -96,7 +96,7 @@ export const capturePage = async (
       "URL-less scripts and console events without an allowed source URL are excluded because their origin cannot be proven.",
       ...(context.target.attached === null
         ? [
-            "CDP discovery omitted the target attachment state; attached is reported as unknown.",
+            "CDP discovery could not establish the target's debugger attachment state.",
           ]
         : []),
     ],

@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { ApktoolResourceAnalysisService } from "../application/apktool/ApktoolResourceAnalysisService.js";
 import type { ApktoolResourceAnalysisPort } from "../application/apktool/ApktoolResourceAnalysisPort.js";
@@ -32,7 +33,7 @@ export const registerApktoolCommands = (
           "apktool",
           operation,
           signal,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
     );
 

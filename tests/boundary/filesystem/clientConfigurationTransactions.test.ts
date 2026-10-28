@@ -55,7 +55,7 @@ it
       { requestedPath, state },
     );
     await publication.verify(async () => {
-      await publication.assertCurrent();
+      await publication.assertCurrent(await readFile(publication.path, "utf8"));
       expect(await readFile(selected, "utf8")).toBe("updated");
       expect(await readFile(join(second, "config.json"), "utf8")).toBe(
         "original",
@@ -342,7 +342,7 @@ describe("TOML client configuration comparison", () => {
     const value = "-inf";
     const root = await createTestTempDirectory("rea-client-toml-");
     const configPath = join(root, "config.toml");
-    const original = `unrelated = ${value}\n[mcp_servers.rea]\ncommand = "old"\nstartup_timeout_sec = ${value}\n`;
+    const original = `unrelated = ${value}\n[mcp_servers.rea]\ncommand = "npx"\nargs = ["-y", "rea-agents@6.1.0", "mcp"]\nstartup_timeout_sec = ${value}\n`;
     await writeFile(configPath, original);
     const client = { name: "codex", format: "toml", configPath } as const;
     expect(
@@ -397,17 +397,17 @@ describe("Codex configuration text preservation", () => {
     },
     {
       name: "quoted tables and nested environment",
-      original: `${unrelatedToml}[mcp_servers."rea"]\ncommand = "old"\n[mcp_servers.rea.env]\nOLD = "value"\n${unrelatedServer}`,
+      original: `${unrelatedToml}[mcp_servers."rea"]\ncommand = "npx"\nargs = ["-y", "rea-agents@6.1.0", "mcp"]\n[mcp_servers.rea.env]\nOLD = "value"\n${unrelatedServer}`,
       preserved: [unrelatedToml, unrelatedServer],
     },
     {
       name: "dotted registration keys",
-      original: `${unrelatedToml}mcp_servers.rea.command = "old"\n${unrelatedServer}`,
+      original: `${unrelatedToml}mcp_servers.rea.command = "npx"\nmcp_servers.rea.args = ["-y", "rea-agents@6.1.0", "mcp"]\n${unrelatedServer}`,
       preserved: [unrelatedToml, unrelatedServer],
     },
     {
       name: "inline server table",
-      original: `${unrelatedToml}mcp_servers = { rea = { command = "old" }, other = { command = 'other' } } # Shared table.\n`,
+      original: `${unrelatedToml}mcp_servers = { rea = { command = "npx", args = ["-y", "rea-agents@6.1.0", "mcp"] }, other = { command = 'other' } } # Shared table.\n`,
       preserved: [
         unrelatedToml,
         "other = { command = 'other' }",

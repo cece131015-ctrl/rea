@@ -422,19 +422,17 @@ const parseCaptureParent = (
   const parsed = parseAnalysisViewResult(captureParser, parent);
   if (!parsed.ok) return parsed;
   const report = parsed.value;
+  const subject = parent.subject;
   if (
     report.artifact.sha256 !== null &&
-    (parent.subject == null ||
-      parent.subject.local_path !== report.artifact.path ||
-      parent.subject.digest.sha256 !== report.artifact.sha256)
+    (subject == null || subject.digest.sha256 !== report.artifact.sha256)
   )
     return err(
       analysisViewInputError([
         {
           path: ["source", "subject"],
           reason: "invalid_value",
-          message:
-            "Capture parent subject must identify the report's exact path and SHA-256.",
+          message: "Capture parent subject must identify the report's SHA-256.",
         },
       ]),
     );

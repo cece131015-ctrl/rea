@@ -103,25 +103,32 @@ export const discoverLocalApplications = async (
         }));
   const needle = normalize(query);
   const records: LocalApplicationSearchRoot[] = [];
-  const found: LocalApplication[] = [];
+  const found: {
+    readonly match: LocalApplication;
+    readonly hidden: boolean;
+  }[] = [];
   for (const root of roots) {
     signal?.throwIfAborted();
     const scan = await scanRoot(root, host, signal);
     records.push(scan.record);
     for (const candidate of scan.candidates) {
       const match = matchCandidate(candidate, needle);
-      if (match !== undefined) found.push(match);
+      if (match !== undefined)
+        found.push({ match, hidden: candidate.hidden === true });
     }
   }
   // Several declarations (for example desktop entries) can name one install;
   // keep the best-ranked one per installed root.
   const seenRoots = new Set<string>();
-  const matches = found.sort(compareMatches).filter((match) => {
-    const identity = match.root_path ?? match.source_path;
-    if (seenRoots.has(identity)) return false;
-    seenRoots.add(identity);
-    return true;
-  });
+  const matches = found
+    .sort(compareMatches)
+    .map(({ match }) => match)
+    .filter((match) => {
+      const identity = match.root_path ?? match.source_path;
+      if (seenRoots.has(identity)) return false;
+      seenRoots.add(identity);
+      return true;
+    });
   const reasons = records.flatMap((record) =>
     record.state === "scanned" || record.state === "missing"
       ? []
@@ -155,24 +162,17 @@ export const discoverLocalApplications = async (
   };
 };
 
-const hiddenRank = (match: LocalApplication): number =>
-  match.limitations.some((limitation) =>
-    / marked (?:Hidden|NoDisplay)\./u.test(limitation),
-  )
-    ? 1
-    : 0;
-
 /** Exact names first, then visible entries, then by name for a stable order. */
 const compareMatches = (
-  left: LocalApplication,
-  right: LocalApplication,
+  left: { readonly match: LocalApplication; readonly hidden: boolean },
+  right: { readonly match: LocalApplication; readonly hidden: boolean },
 ): number =>
-  left.exact !== right.exact
-    ? left.exact
+  left.match.exact !== right.match.exact
+    ? left.match.exact
       ? -1
       : 1
-    : hiddenRank(left) - hiddenRank(right) ||
-      left.name.localeCompare(right.name, "en");
+    : Number(left.hidden) - Number(right.hidden) ||
+      left.match.name.localeCompare(right.match.name, "en");
 
 const matchCandidate = (
   candidate: Candidate,
@@ -190,7 +190,7 @@ const matchCandidate = (
     if (matched === undefined && normalized.includes(needle)) matched = field;
   }
   if (matched === undefined) return undefined;
-  const { names: _names, ...application } = candidate;
+  const { names: _names, hidden: _hidden, ...application } = candidate;
   return { ...application, matched_field: matched, exact };
 };
 
@@ -208,6 +208,7 @@ const scanRoot = async (
   const candidates: Candidate[] = [];
   let entriesRead = 0;
   let truncated = false;
+  const unreadable: string[] = [];
   const record = (
     state: LocalApplicationSearchRoot["state"],
     reason: string | null,
@@ -240,8 +241,14 @@ const scanRoot = async (
         depth === 0 &&
         entry.isDirectory()
       )
-        // Desktop file IDs may live one directory below the root.
-        await visit(path, depth + 1);
+        // Desktop file IDs may live one directory below the root; an
+        // unreadable subdirectory leaves the rest of the root searchable.
+        await visit(path, depth + 1).catch((cause: unknown) => {
+          signal?.throwIfAborted();
+          unreadable.push(
+            `${entry.name}${errorCode(cause) === "" ? "" : ` (${errorCode(cause)})`}`,
+          );
+        });
     }
   };
   try {
@@ -269,7 +276,12 @@ const scanRoot = async (
           "truncated",
           `Stopped after ${LOCAL_APPLICATION_ENTRY_LIMIT} entries.`,
         )
-      : record("scanned", null),
+      : unreadable.length > 0
+        ? record(
+            "partial",
+            `Subdirectories could not be read: ${unreadable.join(", ")}.`,
+          )
+        : record("scanned", null),
     candidates,
   };
 };

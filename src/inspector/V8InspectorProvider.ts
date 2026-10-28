@@ -1,3 +1,4 @@
+import { selectCdpDiscoveryTarget } from "../browser/CdpDiscoveryTargets.js";
 import {
   DEFAULT_ASAR_HEADER_ADMISSION,
   type AsarHeaderAdmission,
@@ -23,13 +24,12 @@ import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { BrowserObservationOperation } from "../domain/browserObservationErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { delayWithCancellation } from "../browser/CdpCaptureValues.js";
 import {
-  executionContextKey,
-  recordValue,
-  cdpStringValue,
-  scriptMetadataValues,
-  delayWithCancellation,
-} from "../browser/CdpCaptureValues.js";
+  readCdpScriptParsed,
+  readCdpExecutionContextCreated,
+  readCdpExecutionContextDestroyed,
+} from "../browser/CdpScriptContextFacts.js";
 import type { CdpConnection, CdpEvent } from "../browser/CdpConnection.js";
 import {
   mapElectronFileAuthorizationFailure,
@@ -53,7 +53,7 @@ import {
 import {
   discoverV8Inspector,
   type AuthorizedV8InspectorTarget,
-  type V8InspectorTarget,
+  type V8InspectorDiscovery,
 } from "./V8InspectorEndpoint.js";
 
 import { V8_INSPECTOR_PROVIDER_IDENTITY } from "./providerIdentity.js";
@@ -365,9 +365,8 @@ export class V8InspectorProvider implements JavaScriptRuntimeObservationPort {
         options.signal,
       );
       target = await authorizedTarget(
-        discovery.targets,
+        discovery,
         input,
-        discovery.runtime.product,
         this.#asarHeaderAdmission,
         options.signal,
       );
@@ -507,14 +506,18 @@ const projectTarget = (target: AuthorizedV8InspectorTarget) => ({
 });
 
 const authorizedTarget = async (
-  targets: readonly V8InspectorTarget[],
+  discovery: V8InspectorDiscovery,
   input: ObserveJavaScriptRuntimeInput,
-  product: string,
   asarHeaderAdmission: AsarHeaderAdmission,
   signal?: AbortSignal,
 ): Promise<AuthorizedV8InspectorTarget> => {
   throwIfRuntimeObservationCancelled(signal);
-  const target = targets.find(({ id }) => id === input.target_id);
+  const target = selectCdpDiscoveryTarget(
+    discovery.targets,
+    input.target_id,
+    "observe_javascript_runtime",
+    discovery.ambiguousTargetIds,
+  );
   if (target === undefined)
     throw new BrowserObservationError(
       "observe_javascript_runtime",
@@ -522,7 +525,7 @@ const authorizedTarget = async (
     );
   const decision = await authorizeRuntimeTargetLocation(
     target.url,
-    { type: target.type, product },
+    { type: target.type, product: discovery.runtime.product },
     signal,
     "observe_javascript_runtime",
     asarHeaderAdmission,
@@ -623,11 +626,8 @@ const ingestEvent = (event: CdpEvent, state: CaptureState): void => {
     return;
   }
   if (event.method === "Debugger.scriptFailedToParse") {
-    const params = recordValue(event.params);
-    if (
-      typeof params?.scriptId !== "string" ||
-      typeof params.url !== "string"
-    ) {
+    const facts = readCdpScriptParsed(event.params);
+    if (facts.scriptId === undefined || facts.url === undefined) {
       state.invalidScripts += 1;
       retainEvent(state, 0);
       return;
@@ -641,17 +641,17 @@ const ingestEvent = (event: CdpEvent, state: CaptureState): void => {
 
 const ingestScript = (event: CdpEvent, state: CaptureState): void => {
   state.scriptsObserved += 1;
-  const value = recordValue(event.params);
-  const rawUrl = cdpStringValue(value?.url);
+  const facts = readCdpScriptParsed(event.params);
+  const rawUrl = facts.url;
   if (rawUrl === undefined) {
     state.invalidScripts += 1;
     retainEvent(state, 0);
     return;
   }
-  const metadata = scriptMetadataValues(value);
+  const { metadata } = facts;
   const draft: ScriptDraft = {
     rawUrl,
-    executionContextKey: executionContextKey(value?.executionContextId),
+    executionContextKey: facts.contextKey,
     cdpHash: metadata.hash,
     length: metadata.length,
     isModule: metadata.isModule,
@@ -675,32 +675,31 @@ const ingestContext = (event: CdpEvent, state: CaptureState): void => {
     }
     return;
   }
-  const parameters = recordValue(event.params);
-  const runtimeContext =
-    event.method === "Runtime.executionContextCreated"
-      ? recordValue(parameters?.context)
-      : parameters;
-  const key = executionContextKey(
-    event.method === "Runtime.executionContextCreated"
-      ? runtimeContext?.id
-      : runtimeContext?.executionContextId,
-  );
+  const created = event.method === "Runtime.executionContextCreated";
+  const createdContext = created
+    ? readCdpExecutionContextCreated(event.params)
+    : undefined;
+  const key =
+    createdContext === undefined
+      ? readCdpExecutionContextDestroyed(event.params).contextKey
+      : createdContext.contextKey;
   if (key === null) {
     state.invalidContexts += 1;
     retainEvent(state, 0);
     return;
   }
   const previous = state.contexts.get(key);
-  const created = event.method === "Runtime.executionContextCreated";
   const draft: ContextDraft = {
     contextKey: key,
     state: created ? "created" : "destroyed",
-    name: created
-      ? (cdpStringValue(runtimeContext?.name) ?? null)
-      : (previous?.name ?? null),
-    origin: created
-      ? (cdpStringValue(runtimeContext?.origin) ?? null)
-      : (previous?.origin ?? null),
+    name:
+      createdContext === undefined
+        ? (previous?.name ?? null)
+        : (createdContext.name ?? null),
+    origin:
+      createdContext === undefined
+        ? (previous?.origin ?? null)
+        : (createdContext.origin ?? null),
   };
   const bytes =
     retainedMetadataBytes(draft) -

@@ -239,6 +239,13 @@ serialized size of the report together with its limitations (which repeat
 archive names) is then checked against an 8 MiB output budget (the exact check
 is authoritative); an over-budget report is refused, not truncated.
 
+Signing blocks admit at most 4096 ID/value pairs; at most 4096 signing-relevant
+META-INF entries are retained. These fixed counts, signer/lineage counts and the
+report byte budget return nonretryable `resource_constraint` errors naming the
+effective allowance. This release has no runtime override for them. Waiting for
+an active scan cannot raise a fixed count, and complete CLI JSON cannot raise the
+report budget. Occupied scan-queue capacity remains retryable after a scan finishes.
+
 The whole-file reader allocates the selected snapshot and bounded read scratch;
 total process memory exceeds the selected file's size. It also computes the complete
 file SHA-256, so inspection is not header-only. Content digests are recomputed

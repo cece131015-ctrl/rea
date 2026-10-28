@@ -33,6 +33,7 @@ import {
 import { locateGodotPck } from "../../../src/artifacts/GodotPckLocation.js";
 import { DirectoryArtifactReader } from "../../../src/artifacts/DirectoryArtifactReader.js";
 import { ArtifactReaderFailure } from "../../../src/artifacts/ArtifactReader.js";
+import { artifactFilePrimaryFacts } from "../../../src/artifacts/ArtifactFileOperation.js";
 import { DesktopApplicationReader } from "../../../src/artifacts/DesktopApplicationReader.js";
 import { DesktopApplicationService } from "../../../src/application/artifacts/DesktopApplicationService.js";
 
@@ -54,6 +55,31 @@ const put = async (root: string, path: string, bytes: Buffer | string) => {
   await mkdir(join(destination, ".."), { recursive: true });
   await writeFile(destination, bytes);
 };
+
+it.each(["NE", "LE", "LX", "PE\0\0"])(
+  "admits the MZ signature before interpreting a trailing %j header as PE",
+  async (signature) => {
+    const root = await createTestTempDirectory("rea-desktop-mz-signature-");
+    const bytes = Buffer.alloc(64 + signature.length);
+    bytes.write("MZ");
+    bytes.writeUInt16LE(4, 8);
+    bytes.writeUInt32LE(64, 60);
+    bytes.write(signature, 64, "latin1");
+    await put(root, "legacy.exe", bytes);
+
+    const { report } = await inspect(root);
+    const file = report.files.find((row) => row.path === "legacy.exe");
+    expect(file?.facts).toEqual([]);
+    expect(file?.issues).toEqual(
+      signature.startsWith("PE") ? ["PE COFF header is truncated"] : [],
+    );
+    expect(file?.ranges).toContainEqual({
+      offset: 64,
+      bytes: signature.length,
+      sha256: expect.any(String),
+    });
+  },
+);
 
 it.each(["oversized-header", "prefix-only-section"] as const)(
   "keeps desktop CLR prefix admission distinct from full managed admission: %s",
@@ -748,6 +774,164 @@ it("preserves the selected root alias and directs follow-ups to the admitted phy
     await service.close();
   }
 });
+
+it.each(
+  ["physical read", "format"].flatMap((variant) =>
+    ["unavailable", "mismatch"].map((validationState) => ({
+      variant,
+      validationState,
+    })),
+  ),
+)(
+  "keeps $variant failure through $validationState final validation while discarding unverified desktop byte facts",
+  async ({ variant, validationState }) => {
+    const root = await createTestTempDirectory(
+      "rea-desktop-failed-validation-",
+    );
+    const header = Buffer.alloc(20);
+    header.write("GDPC");
+    header.writeUInt32LE(2, 4);
+    header.writeUInt32LE(4, 8);
+    await put(root, "game.pck", header);
+    const primary =
+      variant === "physical read"
+        ? Object.assign(new Error("physical read denied"), { code: "EACCES" })
+        : new ArtifactReaderFailure(
+            "format",
+            "invalid later format declaration",
+          );
+    const validation = Object.assign(
+      new Error("final descriptor stat failed"),
+      { code: "EIO" },
+    );
+    let observed: unknown;
+    const service = new DesktopApplicationService(
+      new DesktopApplicationReader((path) => {
+        const reader = new DirectoryArtifactReader(path);
+        const inspectFile = reader.inspectFile.bind(reader);
+        reader.inspectFile = (entry, inspect, signal) =>
+          inspectFile(
+            entry,
+            async (file) => {
+              await inspect(file);
+              if (validationState === "unavailable")
+                vi.spyOn(file, "stat").mockRejectedValueOnce(validation);
+              else {
+                const changed = await file.stat({ bigint: true });
+                changed.ino += 1n;
+                vi.spyOn(file, "stat").mockResolvedValueOnce(changed);
+              }
+              if (variant === "physical read") {
+                vi.spyOn(file, "read").mockRejectedValueOnce(primary);
+                await file.read(Buffer.alloc(4), 0, 4, 0);
+              }
+              throw primary;
+            },
+            signal,
+          ).catch((cause: unknown) => {
+            observed = cause;
+            throw cause;
+          });
+        return reader;
+      }),
+    );
+    try {
+      const result = await service.inspect({ path: root });
+      expect(observed).toMatchObject({
+        reason: validationState === "unavailable" ? "io" : "integrity",
+      });
+      if (validationState === "unavailable")
+        expect((observed as ArtifactReaderFailure).cause).toMatchObject({
+          errors: [primary, validation],
+        });
+      else expect((observed as ArtifactReaderFailure).cause).toBe(primary);
+      if (!result.ok) throw result.error;
+      const report = desktopApplicationSchema.parse(
+        result.value.normalized_result,
+      );
+      expect(report.coverage.status).toBe("partial");
+      expect(report.files[0]).toMatchObject({
+        read_status: "unavailable",
+        ranges: [],
+      });
+      expect(
+        report.files[0]?.facts.filter((fact) => fact.offset !== null),
+      ).toEqual([]);
+      expect(report.files[0]?.issues.join(" ")).toContain(primary.message);
+      expect(report.files[0]?.issues.join(" ")).toContain(
+        validationState === "unavailable"
+          ? validation.message
+          : "Directory entry changed during inspection",
+      );
+      expect(report.candidates).toEqual([]);
+    } finally {
+      await service.close();
+      vi.restoreAllMocks();
+    }
+  },
+);
+
+it.each([false, true])(
+  "preserves a physical desktop read failure when cancellation arrives during final validation (failed close: %s)",
+  async (failedClose) => {
+    const root = await createTestTempDirectory(
+      "rea-desktop-read-final-validation-",
+    );
+    await put(root, "game.pck", Buffer.from("completed source prefix"));
+    const reader = new DirectoryArtifactReader(root);
+    const entries = [];
+    for await (const entry of reader.entries()) entries.push(entry);
+    const controller = new AbortController();
+    const reason = { phase: "after physical read failure" };
+    const physical = Object.assign(new Error("physical read denied"), {
+      code: "EACCES",
+    });
+    let fileHandle: Awaited<ReturnType<typeof open>> | undefined;
+    let denyClose = failedClose;
+    try {
+      const failure: unknown = await reader
+        .inspectFile(
+          entries[0]!,
+          async (file) => {
+            fileHandle = file;
+            const stat = file.stat.bind(file);
+            file.stat = ((...args: Parameters<typeof file.stat>) => {
+              controller.abort(reason);
+              return stat(...args);
+            }) as typeof file.stat;
+            const close = file.close.bind(file);
+            file.close = async () => {
+              if (denyClose) throw new Error("desktop descriptor close denied");
+              await close();
+            };
+            vi.spyOn(file, "read").mockRejectedValueOnce(physical);
+            await file.read(Buffer.alloc(4), 0, 4, 0);
+          },
+          controller.signal,
+        )
+        .catch((cause: unknown) => cause);
+      expect(controller.signal.reason).toBe(reason);
+      expect(failure).toMatchObject({ reason: "io" });
+      const primary = artifactFilePrimaryFacts(failure).cause;
+      if (failedClose) expect(primary).toBe(physical);
+      else expect(primary).toMatchObject({ cause: physical });
+      if (failedClose) {
+        expect(failure).toMatchObject({
+          cleanup: { resources: [entries[0]!.adapterKey] },
+        });
+        await expect(reader.close()).rejects.toBeDefined();
+        expect(fileHandle!.fd).toBeGreaterThanOrEqual(0);
+      }
+      denyClose = false;
+      await reader.close();
+      expect(fileHandle!.fd).toBe(-1);
+    } finally {
+      denyClose = false;
+      await reader.close();
+      vi.restoreAllMocks();
+    }
+  },
+);
 
 it.each([false, true])(
   "retains verified header facts and exact release authority when file close fails (late cancellation: %s)",

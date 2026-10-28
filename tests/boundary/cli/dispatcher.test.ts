@@ -8,7 +8,7 @@ import { workspaceCliTest } from "../../support/cli/workspaceCliFixture.js";
 import type { TestWorkspace } from "../../support/workspace/workspaceFixture.js";
 
 const CLI_OUTPUT_RUNTIME =
-  "export const cliConfigurationError = () => undefined; export const normalizeCliArguments = (args) => args; export const parseCliOutputArguments = () => ({ validation: { ok: true } }); export const renderCliOutputArgumentError = () => ''; export const renderEmptyFilteredCliOutput = () => undefined; export const renderVersionReport = () => undefined;\n";
+  "export const cliConfigurationError = () => undefined; export const parseCliOutputArguments = () => ({ validation: { ok: true } }); export const renderCliOutputArgumentError = () => ''; export const renderEmptyFilteredCliOutput = () => undefined; export const renderVersionReport = () => undefined;\n";
 
 const installCliRuntime = async (
   workspace: TestWorkspace,

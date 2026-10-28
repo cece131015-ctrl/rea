@@ -21,6 +21,7 @@ import { PrivateRuntimeRoot } from "../dist/process/PrivateRuntimeRoot.js";
 import { parseEvidence } from "../dist/domain/evidence.js";
 import {
   requireMcpEvidenceBundle,
+  requireMcpOutput,
   mcpTextValue,
   requireMcpToolError,
 } from "./lib/mcp-verifier-results.mjs";
@@ -278,7 +279,7 @@ try {
       ajv.validate(advertised.outputSchema, reply.structuredContent),
       JSON.stringify(ajv.errors),
     );
-    const mcp = parseEvidence(reply.structuredContent);
+    const mcp = parseEvidence(requireMcpOutput(reply, "inspect_wasm_artifact"));
     assert.equal(cli.evidence_id, mcp.evidence_id);
     assert.deepEqual(cli, mcp);
     const report = mcp.normalized_result;
@@ -516,7 +517,7 @@ try {
       ajv.validate(advertised.outputSchema, reply.structuredContent),
       JSON.stringify(ajv.errors),
     );
-    const mcp = parseEvidence(reply.structuredContent);
+    const mcp = parseEvidence(requireMcpOutput(reply, "inspect_wasm_artifact"));
     assert.deepEqual(cli, mcp);
     const report = mcp.normalized_result;
     assert.equal(report.validation, "valid");

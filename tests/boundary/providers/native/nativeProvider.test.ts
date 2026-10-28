@@ -1449,7 +1449,7 @@ describe("native plist defaults for iOS-style bundles", () => {
       new FixtureRunner(),
       "darwin",
     ).createClient({
-      ...machoTarget(executable, app),
+      ...(await nativeMachoTargetForFile(executable, app)),
       bundleInfoPlist: join(app, "Info.plist"),
     });
 

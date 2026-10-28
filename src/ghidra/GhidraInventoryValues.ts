@@ -1,3 +1,4 @@
+import { nativeSearchFields } from "../domain/native/nativeSearch.js";
 import { nativeSymbolMetadataSchema } from "../domain/native/nativeSymbol.js";
 import { nativeAddressObservationSchema } from "../domain/native/nativeAddress.js";
 import { nativeByteReadSchema } from "../domain/native/nativeByteRead.js";
@@ -18,12 +19,12 @@ import {
   type AnalysisInputError,
   AnalysisOutputError,
 } from "../domain/analysisErrorCore.js";
+import { projectBinaryOverview } from "../domain/native/nativeSegments.js";
 import {
   availableFunctionBodySchema,
-  procedureIdentitySchema,
   functionBodyEntryAgrees,
-  projectBinaryOverview,
-} from "../domain/hopperValues.js";
+} from "../domain/native/functionBody.js";
+import { procedureIdentitySchema } from "../domain/native/procedureInfo.js";
 import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
@@ -82,9 +83,7 @@ export const ghidraInputAddressSchema = z
 const explicitAddress = ghidraInputAddressSchema;
 const filteredAddress = explicitAddress.nullable().default(null);
 const searchInput = {
-  pattern: z.string().min(1),
-  mode: z.enum(["literal", "regex"]).default("literal"),
-  case_sensitive: z.boolean().default(false),
+  ...nativeSearchFields,
   document,
 };
 

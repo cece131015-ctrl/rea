@@ -1,3 +1,4 @@
+import type { ElectronBoundarySummary } from "../../domain/javascript/javascriptApplicationAnalysis.js";
 import { ELECTRON_IDENTITY_LIMITATION } from "../../domain/javascript/javascriptElectronMemberWrites.js";
 import type { ArtifactInventorySnapshot } from "../../domain/artifactInventorySnapshot.js";
 import {
@@ -13,6 +14,7 @@ import {
   selfReferenceOmissions,
   dependencyManifest,
   applicationContainerIdentity,
+  applicationRootPath,
   type JavaScriptArtifactGraphContext,
 } from "./JavaScriptArtifactGraphContext.js";
 import {
@@ -45,8 +47,9 @@ import {
 import { addJavaScriptBundlerNodes } from "./JavaScriptArtifactGraphBundlers.js";
 import { addElectronBoundaries } from "./ElectronBoundaryGraph.js";
 import {
-  classifyElectronIpcPairings,
-  collectElectronIpcRecords,
+  createElectronIpcContext,
+  summarizeElectronBoundaries,
+  type ElectronIpcContext,
 } from "./ElectronBoundaryAnalysis.js";
 
 /**
@@ -58,21 +61,33 @@ export function* buildImmutableJavaScriptArtifactGraphSteps(
   snapshot: ArtifactInventorySnapshot,
   fileSet: JavaScriptArtifactFileSet,
   analysis: JavaScriptArtifactAnalysis,
-): Generator<void, JavaScriptApplicationGraph> {
+): Generator<
+  void,
+  {
+    readonly graph: JavaScriptApplicationGraph;
+    readonly electronSummary: ElectronBoundarySummary;
+  }
+> {
   const input = yield* buildJavaScriptArtifactGraphInputSteps(
     snapshot,
     fileSet,
     analysis,
   );
   // The input was built here and is not retained, so it can be transferred.
-  return yield* sealTransferredJavaScriptApplicationGraphSteps(input);
+  return {
+    graph: yield* sealTransferredJavaScriptApplicationGraphSteps(input.graph),
+    electronSummary: input.electronSummary,
+  };
 }
 
 function* buildJavaScriptArtifactGraphInputSteps(
   snapshot: ArtifactInventorySnapshot,
   fileSet: JavaScriptArtifactFileSet,
   analysis: JavaScriptArtifactAnalysis,
-): Generator<void, unknown> {
+): Generator<
+  void,
+  { readonly graph: unknown; readonly electronSummary: ElectronBoundarySummary }
+> {
   const accumulator = new JavaScriptArtifactGraphAccumulator();
   const root = createJavaScriptArtifactRootNode(accumulator, snapshot);
   const parsedPackages = new Set(
@@ -183,7 +198,10 @@ function* buildJavaScriptArtifactGraphInputSteps(
     yield* addJavaScriptModuleRelationshipsSteps(projectionContext);
   const findingLimitations =
     yield* addJavaScriptStaticFindingsSteps(projectionContext);
-  addElectronBoundaries(projectionContext);
+  const ipc = createElectronIpcContext(analysis, (file) =>
+    applicationRootPath(projectionContext, file),
+  );
+  addElectronBoundaries(projectionContext, ipc);
   yield;
   addJavaScriptHtmlRoles(projectionContext);
   yield;
@@ -191,19 +209,31 @@ function* buildJavaScriptArtifactGraphInputSteps(
   yield;
   const coverage = graphCoverage(context);
   return {
-    schema: "JavaScriptApplicationGraph",
-    root_node_ids:
-      packageRoots.length === 0
-        ? [root.node_id]
-        : packageRoots.map(({ node_id: id }) => id),
-    nodes: accumulator.nodes(),
-    edges: accumulator.edges(),
-    coverage,
-    limitations: [
-      ...bundlerLimitations,
-      ...findingLimitations,
-      ...graphLimitations(context, coverage.status, relationshipOmissions),
-    ],
+    electronSummary: summarizeElectronBoundaries(
+      analysis,
+      ipc,
+      context.directoryPaths,
+    ),
+    graph: {
+      schema: "JavaScriptApplicationGraph",
+      root_node_ids:
+        packageRoots.length === 0
+          ? [root.node_id]
+          : packageRoots.map(({ node_id: id }) => id),
+      nodes: accumulator.nodes(),
+      edges: accumulator.edges(),
+      coverage,
+      limitations: [
+        ...bundlerLimitations,
+        ...findingLimitations,
+        ...graphLimitations(
+          context,
+          coverage.status,
+          relationshipOmissions,
+          ipc,
+        ),
+      ],
+    },
   };
 }
 
@@ -295,9 +325,10 @@ const graphLimitations = (
   context: JavaScriptArtifactGraphContext,
   coverage: "complete" | "partial" | "unknown" | "unavailable",
   relationshipOmissions: JavaScriptModuleRelationshipOmissions,
+  ipcContext: ElectronIpcContext,
 ): string[] => {
-  const ipc = collectElectronIpcRecords(context.analysis);
-  const pairings = classifyElectronIpcPairings(ipc);
+  const ipc = ipcContext.records;
+  const pairings = ipcContext.states;
   const electronFindings = context.analysis.files.reduce(
     (count, { javascript }) =>
       count +
@@ -348,7 +379,7 @@ const graphLimitations = (
       : []),
     ...(pairings.some(({ status }) => status === "ambiguous")
       ? [
-          "Some literal IPC channels have multiple compatible main handlers; ambiguous calls are not paired to any handler.",
+          "Some IPC transmissions have competing handlers or unresolved application ownership; ambiguous calls are not paired to any handler.",
         ]
       : []),
     ...(context.analysis.files.some(

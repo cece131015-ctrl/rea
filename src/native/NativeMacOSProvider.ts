@@ -1,3 +1,4 @@
+import { withArtifactTargetIdentity } from "../artifacts/withArtifactTargetIdentity.js";
 import { translateNativeCommandFailure } from "./NativeCommandAnalysisError.js";
 import {
   plistSourceFormat,
@@ -641,6 +642,9 @@ class NativeMacOSClient implements AnalysisClient {
     );
     if (!parsed.ok) return parsed;
     const { architectures } = parsed.value;
+    const limitations = architectures.flatMap(
+      (architecture) => architecture.limitations,
+    );
     const result = listArchitecturesSchema.parse({
       architectures: {
         items: architectures,
@@ -649,11 +653,11 @@ class NativeMacOSClient implements AnalysisClient {
         limitations: [],
       },
       provenance,
-      limitations: [],
+      limitations,
     });
     return ok({
       result: jsonValueSchema.parse(result),
-      limitations: [],
+      limitations,
       locations: architectureLocations(result.architectures.items),
     });
   }
@@ -953,58 +957,96 @@ class NativeMacOSClient implements AnalysisClient {
       );
     try {
       return await this.#plistResources.run(async () => {
+        if (
+          this.activeTarget === undefined ||
+          this.activeTarget.kind !== "executable" ||
+          this.activeTarget.bundleInfoPlist === undefined
+        )
+          return this.#readPlist(requested, signal, timeoutMs);
         try {
-          const plist =
-            this.bundleResourceRoot === undefined
-              ? await resolveNativePlistSelection(this.target, requested)
-              : resolveBundleResourcePlistSelection(
-                  this.bundleResourceRoot,
-                  requested,
-                );
-          if (!plist.ok) return plist;
-          const fileInput: NativePlistReadContext = {
-            selection: plist.value,
-            resources: this.#plistResources,
+          const observation = await withArtifactTargetIdentity(
+            this.activeTarget,
+            this.#plistResources,
+            async () => {
+              const result = await this.#readPlist(
+                requested,
+                signal,
+                timeoutMs,
+              );
+              if (!result.ok) throw result.error;
+              return result.value;
+            },
             signal,
-            timeoutMs,
-          };
-          const selected = await requireRegularPlist(fileInput);
-          if (!selected.ok) return selected;
-          const classified = await this.#run(
-            "inspect_plist",
-            "file",
-            ["-b", plist.value.path],
-            { signal, timeoutMs },
           );
-          if (!classified.ok) return classified;
-          const binary = await this.#inspectBinaryPlist(
-            fileInput,
-            classified.value,
-          );
-          if (binary !== undefined) return binary;
-          const format = await plistSourceFormat(
-            classified.value.stdout,
-            fileInput,
-          );
-          if (!format.ok) return format;
-          const source = await this.#inspectTextPlist(
-            fileInput,
-            classified.value,
-            format.value,
-          );
-          if (source !== undefined) return source;
-          return await this.#inspectConvertedPlist(
-            fileInput,
-            classified.value,
-            format.value,
-          );
+          return ok(observation);
         } catch (cause: unknown) {
-          // Producer failures stay opaque; only scope admission failures reach the file mapper.
-          return err(nativeOutputFailure("inspect_plist", cause));
+          if (cause instanceof AnalysisError) return err(cause);
+          return err(
+            nativePlistFailure(cause, {
+              path: this.activeTarget.path,
+              origin: "selected",
+            }),
+          );
         }
       });
     } catch (cause: unknown) {
       return err(nativePlistFailure(cause, undefined));
+    }
+  }
+
+  async #readPlist(
+    requested: string | undefined,
+    signal: AbortSignal | undefined,
+    timeoutMs: number,
+  ): Promise<Result<NativeObservation, AnalysisError>> {
+    try {
+      const plist =
+        this.bundleResourceRoot === undefined
+          ? await resolveNativePlistSelection(this.target, requested)
+          : resolveBundleResourcePlistSelection(
+              this.bundleResourceRoot,
+              requested,
+            );
+      if (!plist.ok) return plist;
+      const fileInput: NativePlistReadContext = {
+        selection: plist.value,
+        resources: this.#plistResources,
+        signal,
+        timeoutMs,
+      };
+      const selected = await requireRegularPlist(fileInput);
+      if (!selected.ok) return selected;
+      const classified = await this.#run(
+        "inspect_plist",
+        "file",
+        ["-b", plist.value.path],
+        { signal, timeoutMs },
+      );
+      if (!classified.ok) return classified;
+      const binary = await this.#inspectBinaryPlist(
+        fileInput,
+        classified.value,
+      );
+      if (binary !== undefined) return binary;
+      const format = await plistSourceFormat(
+        classified.value.stdout,
+        fileInput,
+      );
+      if (!format.ok) return format;
+      const source = await this.#inspectTextPlist(
+        fileInput,
+        classified.value,
+        format.value,
+      );
+      if (source !== undefined) return source;
+      return await this.#inspectConvertedPlist(
+        fileInput,
+        classified.value,
+        format.value,
+      );
+    } catch (cause: unknown) {
+      // Producer failures stay opaque; only scope admission failures reach the file mapper.
+      return err(nativeOutputFailure("inspect_plist", cause));
     }
   }
 

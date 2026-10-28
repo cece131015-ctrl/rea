@@ -2,6 +2,7 @@ import type { RegularFileState } from "../filesystem/RegularFile.js";
 import {
   RegularFileChangedError,
   sameRegularFileState,
+  RegularFileOperationCancelled,
 } from "../filesystem/RegularFile.js";
 import { assertKunaFileState } from "./KunaProjectState.js";
 import { createReadStream } from "node:fs";
@@ -18,13 +19,13 @@ import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
+import { readFileHandleRange } from "../filesystem/readFileHandleRange.js";
 import {
   RegularFileCancelled,
   RegularFileCleanupFailure,
   OwnedRegularFileOperationFailure,
   withOwnedFileHandle,
 } from "../filesystem/OwnedRegularFile.js";
-import { RegularFileOperationCancelled } from "../filesystem/RegularFile.js";
 import { ABORTED, waitForAbortable } from "../process/AbortablePromise.js";
 import type { KunaProject } from "./KunaProjectCache.js";
 import {
@@ -107,12 +108,24 @@ const readSpan = async (
   if (!opened.ok) return opened;
   const owner = new OwnedFileHandle(opened.value);
   let read: Result<string, unknown>;
+  let spanCancellation: AnalysisCancelledError | undefined;
   try {
     if (!sameRegularFileState(expected, await owner.handle.stat()))
       throw new RegularFileChangedError(path);
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await owner.handle.read(buffer, 0, length, offset);
-    if (bytesRead !== length)
+    const buffer = await readFileHandleRange(
+      owner.handle,
+      offset,
+      length,
+      (bytesRead) => {
+        // Preserve a fully acquired span for owned finalization, which records
+        // cancellation alongside its text if descriptor cleanup fails.
+        if (bytesRead < length && signal?.aborted)
+          throw (spanCancellation = new AnalysisCancelledError(operation, {
+            cause: signal.reason,
+          }));
+      },
+    );
+    if (buffer.length !== length)
       throw new Error(`${path} is shorter than its recorded span`);
     if (!sameRegularFileState(expected, await owner.handle.stat()))
       throw new RegularFileChangedError(path);
@@ -137,6 +150,12 @@ const readSpan = async (
             }),
       },
       async () => {
+        if (
+          !read.ok &&
+          spanCancellation !== undefined &&
+          read.error === spanCancellation
+        )
+          throw read.error;
         if (!read.ok) throw new OwnedRegularFileOperationFailure(read.error);
         return read.value;
       },
@@ -148,6 +167,8 @@ const readSpan = async (
         : await ownership.finishSpan(finish);
     return ok(value);
   } catch (cause: unknown) {
+    if (spanCancellation !== undefined && cause === spanCancellation)
+      return err(spanCancellation);
     if (cause instanceof OwnedRegularFileOperationFailure) {
       if (cause.operationCause instanceof RegularFileChangedError)
         throw cause.operationCause;

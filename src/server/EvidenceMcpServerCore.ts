@@ -58,8 +58,6 @@ import {
 } from "./toolResultEncoding.js";
 import { RequestTrackingMcpServer } from "./RequestTrackingMcpServer.js";
 
-export type { CompactInputSchemaPresentation } from "../contracts/compactInputSchema.js";
-
 const currentRequestSignal = new AsyncLocalStorage<AbortSignal>();
 
 /** Signal for the completion request currently being dispatched by the SDK. */

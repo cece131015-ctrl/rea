@@ -415,7 +415,8 @@ allowance; exhaustion fails the observation explicitly instead of guessing scope
 Response metadata parses repeated CDP header field lines independently. The
 Link projection retains their declarations in order. `csp.directives` lists the
 directives of every CSP policy in order, across field lines and comma-separated
-policies, without recording policy boundaries, so a directive name can repeat.
+policies, without recording policy boundaries, so a directive name can repeat
+across policies. As in CSP3, a repeated name within one policy is ignored.
 Single-valued policy fields combine their lines as one comma-separated value,
 as RFC 9110 specifies. Each link keeps its target in `href` and
 its relationship context in `context_url` with a separate `context_scope`;

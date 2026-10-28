@@ -1,3 +1,6 @@
+import { pythonPycFixture } from "../../python/PythonPyc.fixture.js";
+import { parsePythonPyc } from "../../python/PythonPycParser.js";
+import { inspectPythonPycInputSchema } from "../../domain/python/pythonPyc.js";
 import { createHash } from "node:crypto";
 import { open, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,7 +22,7 @@ it("lists modules from a supported PYZ and leaves an unknown magic opaque", asyn
   if (!parsed.ok || parsed.value.kind !== "entries") return;
   expect(parsed.value.pythonVersion).toBe("3.9");
   expect(parsed.value.entries).toMatchObject([
-    { name: "json.decoder", typeCode: 0, package: false },
+    { name: "json.decoder", typeCode: 0, role: "module" },
   ]);
 
   const opaque = await readImage(
@@ -182,3 +185,41 @@ it("reports the signature after completing a readable table and image hash", asy
     error: { reason: "format", message: "PYZ archive magic does not match" },
   });
 });
+
+it.each([
+  { magic: 3412, layout: "py38", version: "3.8", reconstructable: false },
+  { magic: 3571, layout: "py311", version: "3.13", reconstructable: true },
+] as const)(
+  "keeps standalone identity separate from PYZ reconstruction for magic $magic",
+  async ({ magic, layout, version, reconstructable }) => {
+    const pyc = pythonPycFixture(layout, { magic });
+    const standalone = parsePythonPyc(
+      pyc,
+      {
+        path: "/fixtures/module.pyc",
+        bytes: pyc.length,
+        sha256: createHash("sha256").update(pyc).digest("hex"),
+      },
+      inspectPythonPycInputSchema.parse({ path: "/fixtures/module.pyc" }),
+    );
+    expect(standalone.header.python_version).toBe(version);
+    const image = pyzArchive({
+      magic: pyc.subarray(0, 4),
+      modules: [{ name: "module", typeCode: 0, body: pyc.subarray(16) }],
+    });
+    const parsed = await readImage(image);
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        kind: reconstructable ? "entries" : "opaque",
+        pythonMagic: pyc.subarray(0, 4),
+        pythonVersion: reconstructable ? version : undefined,
+        sha256: createHash("sha256").update(image).digest("hex"),
+      },
+    });
+    if (parsed.ok && parsed.value.kind === "entries")
+      expect(parsed.value.entries).toMatchObject([
+        { name: "module", typeCode: 0, role: "module" },
+      ]);
+  },
+);

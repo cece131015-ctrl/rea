@@ -15,6 +15,8 @@ export interface LocalApplicationHost {
 export type Candidate = Omit<LocalApplication, "matched_field" | "exact"> & {
   /** Searchable names by field, in priority order. */
   readonly names: readonly (readonly [field: string, value: string])[];
+  /** A desktop entry marked Hidden or NoDisplay; ranks after visible ones. */
+  readonly hidden?: boolean;
 };
 
 export const isDirectory = async (path: string): Promise<boolean> => {

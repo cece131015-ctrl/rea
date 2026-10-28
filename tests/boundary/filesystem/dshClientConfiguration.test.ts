@@ -1,3 +1,4 @@
+import { currentClientRegistrationCommand } from "../../../src/application/ClientRegistrationIdentity.js";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -11,7 +12,7 @@ import {
 } from "yaml";
 
 import { readClientRegistrationStatuses } from "../../../src/application/ClientRegistrationStatus.js";
-import { npxRegistrationCommand } from "../../../src/application/ClientRegistrationIdentity.js";
+
 import {
   configureClientConfiguration,
   inspectClientConfiguration,
@@ -28,7 +29,9 @@ import { clearClientLocationEnvironment } from "../../fixtures/clientEnvironment
  * The registration command setup writes on the host running the tests. Windows
  * wraps it in `cmd.exe /d /c`, so the expected entry follows the host too.
  */
-const command = npxRegistrationCommand(process.platform);
+const command = currentClientRegistrationCommand({
+  platform: process.platform,
+});
 
 beforeEach(clearClientLocationEnvironment);
 afterEach(() => vi.unstubAllEnvs());

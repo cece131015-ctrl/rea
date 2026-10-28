@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 import { z } from "zod";
 
 import {
@@ -61,6 +63,27 @@ interface CaptureRead {
     readonly lease?: AnalysisCleanupLease;
   };
 }
+
+/** Name each saved-capture path field that is not absolute on this host. */
+export const savedCapturePathsError = (
+  operation: WebCaptureExportOperation,
+  input: { readonly capture_path: string; readonly output_directory: string },
+): AnalysisInputError | undefined => {
+  const invalid = (["capture_path", "output_directory"] as const).filter(
+    (field) => !isAbsolute(input[field]),
+  );
+  return invalid.length === 0
+    ? undefined
+    : new AnalysisInputError(
+        operation,
+        undefined,
+        invalid.map((field) => ({
+          path: [field],
+          reason: "invalid_format" as const,
+          message: `${field} must be an absolute filesystem path on this host.`,
+        })),
+      );
+};
 
 /** Read, decode and select one caller-selected saved capture file. */
 export const readSavedWebCapture = async <Selected>(

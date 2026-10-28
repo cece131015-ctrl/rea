@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import type { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { PLAYWRIGHT_RESPONSE_BODY_PROVENANCE_LIMITATION } from "../../domain/browserNetworkEvidence.js";
-import { parseMediaType } from "../../domain/mediaType.js";
+import { mediaTypeParameter } from "../../domain/analysisView/recordedMediaType.js";
 import {
   rewriteCss,
   rewriteHtml,
@@ -94,7 +94,6 @@ const viewKind = (file: PlannedMirrorFile): ViewKind | undefined =>
 
 const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-/** Decode bytes eligible for a rewritten view, or undefined when unsafe. */
 // Single-byte charsets that encode ASCII identically.
 const ASCII_COMPATIBLE_CHARSET =
   /^(?:iso-8859-\d{1,2}|latin1|windows-125\d|cp125\d|ascii)$/u;
@@ -111,7 +110,7 @@ const viewText = (
   const charset = (
     file.body.media_type === null
       ? undefined
-      : parseMediaType(file.body.media_type)?.parameters.get("charset")
+      : mediaTypeParameter(file.body.media_type, "charset")
   )?.toLowerCase();
   const utf8 =
     charset === undefined ||

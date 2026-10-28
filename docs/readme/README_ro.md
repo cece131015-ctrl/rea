@@ -429,7 +429,7 @@ Raportează vulnerabilitățile conform [SECURITY.md](../../SECURITY.md).
 
 ## Istoricul stelelor
 
-🎉 **300.000 de stele pe GitHub — vă mulțumim!**
+🎉 **400.000 de stele pe GitHub — vă mulțumim!**
 
 Mulțumim tuturor celor care folosesc REA, raportează erori, propun funcționalități,
 testează versiuni și contribuie cu remedieri.

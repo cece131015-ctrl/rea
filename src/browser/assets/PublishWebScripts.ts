@@ -11,7 +11,7 @@ import {
   type WebScriptExportResult,
 } from "../../domain/webScriptExport.js";
 import {
-  isolatedScriptPath,
+  isolatedWebScriptPath,
   planWebScriptExport,
   type PlannedWebScript,
 } from "../../domain/webScriptExportPlan.js";
@@ -144,7 +144,7 @@ const publishPlannedScript = async (
     const collision = destinationCollisionReason(cause);
     if (collision === undefined || record.content.layout !== "url-path")
       throw cause;
-    const relativePath = isolatedScriptPath(script, index);
+    const relativePath = isolatedWebScriptPath(script.source, index);
     await write(relativePath);
     return {
       ...record,

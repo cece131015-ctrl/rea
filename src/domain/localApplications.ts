@@ -91,7 +91,7 @@ const searchRootSchema = z.strictObject({
     "appimages",
     "caller-selected",
   ]),
-  state: z.enum(["scanned", "missing", "unreadable", "truncated"]),
+  state: z.enum(["scanned", "missing", "unreadable", "truncated", "partial"]),
   reason: z.string().nullable(),
   entries_read: z.number().int().min(0),
 });

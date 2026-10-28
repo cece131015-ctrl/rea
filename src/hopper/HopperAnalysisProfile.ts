@@ -43,6 +43,7 @@ import {
   type MachoTargetSelection,
 } from "../domain/apple/machoTargetSelection.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { readFatMagicFormat } from "../domain/apple/machoContainer.js";
 import { err, ok, type Result } from "../domain/result.js";
 
 import {
@@ -100,11 +101,9 @@ const resolveHopperAnalysisProfileInScope = async (
       options.signal,
     );
     if (!header.ok) return header;
-    machoContainer = [0xcafebabf, 0xbfbafeca].includes(header.value)
-      ? "fat64"
-      : [0xcafebabe, 0xbebafeca].includes(header.value)
-        ? "fat32"
-        : "thin";
+    const fatFormat = readFatMagicFormat(header.value);
+    machoContainer =
+      fatFormat === null ? "thin" : fatFormat.wide ? "fat64" : "fat32";
   }
   let preparedImage: HopperMachOImage | undefined;
   if (

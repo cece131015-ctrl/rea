@@ -1374,3 +1374,72 @@ nativeTest.each([
     await expectPrivateRootRemoved(ownedRoot);
   },
 );
+
+nativeTest.each([
+  { encoding: "malformed UTF-8", code: "unreadable_output" },
+  { encoding: "literal replacement character", code: "capability_unavailable" },
+  { encoding: "UTF-8 BOM", code: "unreadable_output" },
+  { encoding: "malformed JSON", code: "unreadable_output" },
+] as const)(
+  "admits complete SQLite reply-file JSON without replacement decoding: $encoding",
+  async ({ encoding, code }) => {
+    const { database } = await createFixture();
+    let ownedRoot = "";
+    const provider = new SqliteDatabaseProvider(process.env, async (spawn) => {
+      ownedRoot = spawn.cwd ?? "";
+      const requestPath = spawn.arguments[2];
+      if (requestPath === undefined)
+        throw new Error("SQLite request path missing");
+      const request = JSON.parse(await readFile(requestPath, "utf8")) as {
+        reply_path: string;
+      };
+      const valid = Buffer.from(
+        JSON.stringify({
+          ok: false,
+          reason: "unavailable",
+          message: "recorded \ufffd diagnostic",
+        }),
+      );
+      let bytes = valid;
+      if (encoding === "malformed UTF-8") {
+        const replacementOffset = valid.indexOf(Buffer.from("\ufffd"));
+        expect(replacementOffset).toBeGreaterThanOrEqual(0);
+        bytes = Buffer.concat([
+          valid.subarray(0, replacementOffset),
+          Buffer.from([0xff]),
+          valid.subarray(replacementOffset + 3),
+        ]);
+      } else if (encoding === "UTF-8 BOM") {
+        bytes = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), valid]);
+      } else if (encoding === "malformed JSON") {
+        bytes = Buffer.from("{ malformed reply");
+      }
+      await writeFile(request.reply_path, bytes, { flag: "wx", mode: 0o600 });
+      return spawnOwnedProviderProcess({
+        ...spawn,
+        arguments: [
+          "-e",
+          "process.stderr.write('sqlite-reply-marker'); process.exit(0)",
+        ],
+      });
+    });
+    onTestFinished(() => provider.close());
+    const result = await provider.inspect({ path: database.path });
+    if (result.ok) throw new Error("Expected worker refusal");
+    expect(projectAnalysisError(result.error).code).toBe(code);
+    expect(result.error.capturedOutput).toMatchObject({
+      stderr: "sqlite-reply-marker",
+      truncated: false,
+    });
+    if (encoding === "literal replacement character")
+      expect(projectAnalysisError(result.error).message).toBe(
+        "recorded \ufffd diagnostic",
+      );
+    else
+      expect(result.error.cause).toBeInstanceOf(
+        encoding === "malformed UTF-8" ? TypeError : SyntaxError,
+      );
+    await provider.close();
+    await expectPrivateRootRemoved(ownedRoot);
+  },
+);

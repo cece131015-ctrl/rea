@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
 import { evmInterfaceModule } from "../composition/evm.js";
 import { logCliCommand } from "../cliLogging.js";
@@ -46,7 +47,7 @@ export const registerEvmCommands = (
             "evmole-interface",
             "inspect_evm_interface",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });

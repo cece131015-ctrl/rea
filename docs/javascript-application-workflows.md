@@ -156,6 +156,10 @@ Select one literal seed kind: node ID, route, string, API, IPC channel, module,
 or native export. Matching is exact or literal substring matching; regular
 expressions and executable predicates are not accepted. The trace includes all
 matching seeds and the complete graph reachable in the selected direction.
+`both` follows relationships in either direction, except that a container
+reached through `contains` from one of its children only leads further up its
+containment chain, so a shared asset or artifact root does not pull in its
+other children.
 
 The result contains the matching basis, complete reachable subgraph, terminal
 paths, authority summaries, and native handoffs. A handoff binds

@@ -1,4 +1,5 @@
 import { SdkErrorCode } from "@modelcontextprotocol/client";
+import { ArtifactResourceScope } from "../../../src/artifacts/ArtifactResourceScope.js";
 import { expect, it as test, onTestFinished, vi } from "vitest";
 import {
   access,
@@ -459,6 +460,38 @@ it("retire sessions when APK bytes, engine bytes or JVM options change", async (
   await verifyCleanup(launches);
 });
 
+it("keeps one operation's JVM environment aligned with its retained session identity", async () => {
+  const { service, apk, launches, provider, environment } = await setup();
+  environment.JAVA_TOOL_OPTIONS = "-Xmx512m";
+  const createRoot = PrivateRuntimeRoot.create.bind(PrivateRuntimeRoot);
+  const allocation = vi
+    .spyOn(PrivateRuntimeRoot, "create")
+    .mockImplementationOnce(async (options) => {
+      // Configuration and the reuse key are already admitted; launch follows
+      // this asynchronous workspace boundary.
+      environment.JAVA_TOOL_OPTIONS = "-Xmx8g";
+      return createRoot(options);
+    });
+  try {
+    const first = await service.execute("inspect_android_package", {
+      path: apk,
+    });
+    if (!first.ok) throw first.error;
+    expect(allocation).toHaveBeenCalledOnce();
+    environment.JAVA_TOOL_OPTIONS = "-Xmx512m";
+    const second = await service.execute("inspect_android_package", {
+      path: apk,
+    });
+    if (!second.ok) throw second.error;
+    expect(launches).toHaveLength(1);
+    expect(launches[0]?.javaToolOptions).toBe("-Xmx512m");
+  } finally {
+    allocation.mockRestore();
+    await provider.close();
+    await verifyCleanup(launches);
+  }
+});
+
 it("retires an idle engine and starts a fresh one for a later request", async () => {
   const { service, apk, launches, provider } = await setup();
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -486,6 +519,39 @@ it("retires an idle engine and starts a fresh one for a later request", async ()
   expect(launches).toHaveLength(2);
   await provider.close();
   await verifyCleanup(launches);
+});
+
+it("keeps idle retirement after refusing a mapping for a loaded engine", async () => {
+  const { service, apk, launches, provider } = await setup();
+  const missing = `${await createTestTempDirectory("rea-jadx-mapping-")}/mapping.txt`;
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const first = await service.execute("inspect_android_package", {
+      path: apk,
+    });
+    if (!first.ok) throw first.error;
+    const refused = await service.execute("inspect_android_class", {
+      path: apk,
+      class_name: "example.Missing",
+      mapping_path: missing,
+    });
+    expect(refused.ok).toBe(false);
+    vi.advanceTimersByTime(60_000);
+  } finally {
+    vi.useRealTimers();
+  }
+  await expect
+    .poll(async () => {
+      try {
+        await verifyCleanup(launches);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .toBe(true);
+  expect(launches).toHaveLength(1);
+  await provider.close();
 });
 
 it("completes large class inventories with exact case-sensitive search semantics", async () => {
@@ -918,6 +984,8 @@ it("bounds each upstream call by the selected deadline instead of a fixed limit"
         bridgeHash: "0".repeat(64),
         signal: new AbortController().signal,
         timeoutMs: 300,
+        resources: new ArtifactResourceScope(),
+        deadline: new AbortController().signal,
       }),
     ).rejects.toMatchObject({
       code: SdkErrorCode.RequestTimeout,

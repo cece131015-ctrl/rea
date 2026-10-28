@@ -1,5 +1,6 @@
+import { currentClientRegistrationCommand } from "../../../src/application/ClientRegistrationIdentity.js";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { expect } from "vitest";
 
@@ -15,7 +16,12 @@ cliTest(
   async ({ cli }) => {
     const home = await createTestTempDirectory("rea-codex-tool-policy-");
     const config = join(home, ".codex/config.toml");
-    const original = codexToolPolicySource("tables");
+    const original = codexToolPolicySource(
+      "tables",
+      currentClientRegistrationCommand({
+        entrypointPath: resolve("scripts/rea.mjs"),
+      }),
+    );
     await mkdir(dirname(config), { recursive: true });
     await writeFile(config, original);
     const run = (arguments_: readonly string[]) =>

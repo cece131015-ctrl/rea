@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { expect, it } from "vitest";
@@ -21,7 +21,10 @@ import {
   reconcileJavaScriptRuntimeInputSchema,
   javascriptRuntimeReconciliationResultSchema,
 } from "../../../../src/domain/javascript/javascriptRuntimeReconciliationSchemas.js";
-import { electronActiveObservationInputSchema } from "../../../../src/domain/javascript/electronActiveObservation.js";
+import {
+  electronActiveObservationInputSchema,
+  type ElectronActiveObservationInput,
+} from "../../../../src/domain/javascript/electronActiveObservation.js";
 import { createElectronActiveObservationFixtureResult } from "../../../../src/domain/javascript/electronActiveObservation.fixture.js";
 
 import {
@@ -354,48 +357,69 @@ it("preserves unknown Electron frame provenance without linking it to an authori
   ).toBe(false);
 });
 
-it("reconciles active Electron as a partial target-only runtime capture", async () => {
-  const fixture = await applicationFixture();
-  const staticEvidence = await analyzeFixture(fixture);
-  const applicationPath = join(fixture, "main.js");
-  const input = {
-    ...electronActiveObservationInputSchema.parse({
-      executable_path: process.execPath,
-      application_path: applicationPath,
+it.each(["historical", "selected-paths"] as const)(
+  "reconciles %s active Electron as a partial target-only runtime capture",
+  async (representation) => {
+    const fixture = await applicationFixture();
+    const staticEvidence = await analyzeFixture(fixture);
+    const applicationPath = join(fixture, "main.js");
+    const input = {
+      ...electronActiveObservationInputSchema.parse({
+        executable_path: process.execPath,
+        application_path: applicationPath,
+        application_root: fixture,
+        actions: [],
+      }),
       application_root: fixture,
-      actions: [],
-    }),
-    application_root: fixture,
-  };
-  const runtimeEvidence = createElectronActiveEvidence(
-    input,
-    createElectronActiveObservationFixtureResult(applicationPath),
-    {
-      id: "rea-playwright-electron-active",
-      name: "REA Playwright active Electron observation provider",
-      version: "1",
-    },
-  );
+    };
+    const capture =
+      createElectronActiveObservationFixtureResult(applicationPath);
+    let selectedInput: ElectronActiveObservationInput = input;
+    let resolvedInput: typeof input | undefined;
+    if (representation === "selected-paths") {
+      const alias = join(fixture, "selected-main.js");
+      await symlink(applicationPath, alias);
+      selectedInput = electronActiveObservationInputSchema.parse({
+        executable_path: process.execPath,
+        application_path: alias,
+      });
+      resolvedInput = {
+        ...input,
+        executable_path: await realpath(process.execPath),
+      };
+      capture.application.executable_path = resolvedInput.executable_path;
+    }
+    const runtimeEvidence = createElectronActiveEvidence(
+      selectedInput,
+      capture,
+      {
+        id: "rea-playwright-electron-active",
+        name: "REA Playwright active Electron observation provider",
+        version: "1",
+      },
+      resolvedInput,
+    );
 
-  const result = reconcileInput({
-    static_layers: [{ role: "application", analysis: staticEvidence }],
-    runtime_observations: [runtimeEvidence],
-  });
+    const result = reconcileInput({
+      static_layers: [{ role: "application", analysis: staticEvidence }],
+      runtime_observations: [runtimeEvidence],
+    });
 
-  expect(result.runtime_captures).toMatchObject([
-    {
-      kind: "electron-active",
-      scripts: 0,
-      frames: 0,
-      workers: 0,
-      scripts_complete_within_scope: false,
-    },
-  ]);
-  expect(result.coverage.status).toBe("partial");
-  expect(result.limitations.join(" ")).toMatch(
-    /incomplete|not reported as executed/u,
-  );
-});
+    expect(result.runtime_captures).toMatchObject([
+      {
+        kind: "electron-active",
+        scripts: 0,
+        frames: 0,
+        workers: 0,
+        scripts_complete_within_scope: false,
+      },
+    ]);
+    expect(result.coverage.status).toBe("partial");
+    expect(result.limitations.join(" ")).toMatch(
+      /incomplete|not reported as executed/u,
+    );
+  },
+);
 
 it("commits complete Electron actions independently from selected arguments", async () => {
   const fixture = await applicationFixture();

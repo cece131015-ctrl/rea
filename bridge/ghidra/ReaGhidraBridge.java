@@ -2099,10 +2099,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         requireKeys(params, Set.of("document", "address"));
         requireDocument(params);
         Address query = requireAddress(params, "address");
-        Function function = currentProgram.getFunctionManager().getFunctionAt(query);
-        if (function == null && query.isMemoryAddress()) {
-            function = currentProgram.getFunctionManager().getFunctionContaining(query);
-        }
+        Function function = functionAtOrContaining(query);
         JsonObject result = new JsonObject();
         result.addProperty("query_address", canonicalAddress(query));
         if (function != null) {
@@ -2118,10 +2115,9 @@ public final class ReaGhidraBridge extends HeadlessScript {
     }
 
     private JsonArray search(JsonObject params, boolean procedureSearch) throws Exception {
-        requireKeys(
-            params,
-            Set.of("pattern", "mode", "case_sensitive", "document")
-        );
+        Set<String> keys = new HashSet<>(Set.of("pattern", "mode", "case_sensitive", "document"));
+        if (params.has("literal_ascii_candidate")) keys.add("literal_ascii_candidate");
+        requireKeys(params, keys);
         requireDocument(params);
         String expression = requireString(params, "pattern");
         String mode = requireString(params, "mode");
@@ -2132,9 +2128,18 @@ public final class ReaGhidraBridge extends HeadlessScript {
         List<InventoryItem> inventory = procedureSearch
             ? procedures().stream().map(FunctionEntry::item).toList()
             : strings();
-        ValueMatcher matcher = mode.equals("literal")
-            ? literalMatcher(expression, caseSensitive)
-            : regexMatcher(expression, caseSensitive);
+        ValueMatcher matcher;
+        if (mode.equals("literal") && !caseSensitive) {
+            if (!params.has("literal_ascii_candidate"))
+                throw new RequestFailure("invalid_request", "Insensitive literal search requires an ASCII candidate");
+            matcher = literalCandidateMatcher(optionalString(params, "literal_ascii_candidate"));
+        } else {
+            if (params.has("literal_ascii_candidate"))
+                throw new RequestFailure("invalid_request", "ASCII candidate applies only to insensitive literals");
+            matcher = mode.equals("literal")
+                ? literalMatcher(expression)
+                : regexMatcher(expression, caseSensitive);
+        }
         JsonArray items = new JsonArray();
         for (InventoryItem item : inventory) {
             monitor.checkCancelled();
@@ -2291,6 +2296,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         return function;
     }
 
+    /** Exact entries include externals; containment applies only to memory addresses. */
     private Function functionAtOrContaining(Address address) {
         Function function = currentProgram.getFunctionManager().getFunctionAt(address);
         return function == null && address.isMemoryAddress()
@@ -2995,7 +3001,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         if (!currentProgram.getLanguageID().getIdAsString().startsWith("AARCH64:")) {
             return null;
         }
-        Function function = containingFunction(jumpTable.getSwitchAddress());
+        Function function = functionAtOrContaining(jumpTable.getSwitchAddress());
         if (function == null) return null;
 
         List<Instruction> instructions = new ArrayList<>();
@@ -3495,7 +3501,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
 
     private boolean unrepresentedCaller(Reference reference, Set<Function> callers) {
         if (!reference.getReferenceType().isCall()) return false;
-        Function caller = containingFunction(reference.getFromAddress());
+        Function caller = functionAtOrContaining(reference.getFromAddress());
         return caller == null || !callers.contains(caller);
     }
 
@@ -3642,7 +3648,7 @@ public final class ReaGhidraBridge extends HeadlessScript {
         void observe(Reference reference) {
             if (!reference.getReferenceType().isCall()) return;
             // Reference identity follows the same containing-function owner as referenceEdge.
-            Function target = containingFunction(reference.getToAddress());
+            Function target = functionAtOrContaining(reference.getToAddress());
             if (returnedCallees != null && (target == null || !returnedCallees.contains(target)))
                 unrepresented++;
             if (target == null) unresolved(reference.getFromAddress(),
@@ -3812,8 +3818,8 @@ public final class ReaGhidraBridge extends HeadlessScript {
         JsonObject result = new JsonObject();
         result.addProperty("source_address", canonicalAddress(reference.getFromAddress()));
         result.addProperty("target_address", canonicalAddress(reference.getToAddress()));
-        Function source = containingFunction(reference.getFromAddress());
-        Function target = containingFunction(reference.getToAddress());
+        Function source = functionAtOrContaining(reference.getFromAddress());
+        Function target = functionAtOrContaining(reference.getToAddress());
         result.add(
             "source_procedure",
             source == null ? JsonNull.INSTANCE : procedureIdentity(source)
@@ -3845,14 +3851,6 @@ public final class ReaGhidraBridge extends HeadlessScript {
         result.addProperty("primary", reference.isPrimary());
         result.addProperty("operand_index", reference.getOperandIndex());
         result.addProperty("external", reference.isExternalReference());
-        return result;
-    }
-
-    private Function containingFunction(Address address) {
-        Function result = currentProgram.getFunctionManager().getFunctionAt(address);
-        if (result == null && address.isMemoryAddress()) {
-            result = currentProgram.getFunctionManager().getFunctionContaining(address);
-        }
         return result;
     }
 
@@ -4707,11 +4705,18 @@ public final class ReaGhidraBridge extends HeadlessScript {
         return source.name().toLowerCase(Locale.ROOT);
     }
 
-    private static ValueMatcher literalMatcher(String pattern, boolean caseSensitive) {
-        String needle = caseSensitive ? pattern : pattern.toLowerCase(Locale.ROOT);
+    private static ValueMatcher literalMatcher(String pattern) {
+        return value -> value.contains(pattern);
+    }
+
+    // REA's host owns Unicode simple folding. Keep all non-ASCII source values
+    // for its final predicate, and filter ASCII-only values without Java regexes.
+    private static ValueMatcher literalCandidateMatcher(String asciiPattern) {
+        if (asciiPattern != null && asciiPattern.chars().anyMatch(character -> character > 127))
+            throw new RequestFailure("invalid_request", "ASCII candidate contains a non-ASCII character");
         return value -> {
-            String candidate = caseSensitive ? value : value.toLowerCase(Locale.ROOT);
-            return candidate.contains(needle);
+            if (value.chars().anyMatch(character -> character > 127)) return true;
+            return asciiPattern != null && value.toLowerCase(Locale.ROOT).contains(asciiPattern);
         };
     }
 

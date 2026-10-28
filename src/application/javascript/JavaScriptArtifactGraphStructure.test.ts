@@ -1,3 +1,5 @@
+import { addElectronIpcBoundaries } from "./ElectronBoundaryGraphIpc.js";
+import { createElectronIpcContext } from "./ElectronBoundaryAnalysis.js";
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 
@@ -443,3 +445,38 @@ it.each([
     }
   },
 );
+
+it("attaches sender validation to the innermost handler after a long minified line", () => {
+  const source = `const {ipcMain}=require('electron');/*${"x".repeat(2_000_010)}*/ipcMain.handle('outer', event=>{
+  ipcMain.handle('inner', event=>{ if(event.senderFrame.url === 'https://trusted.test') return true; });
+});`;
+  const file = {
+    ...skippedFile(),
+    bytes: Buffer.byteLength(source),
+    text: { included: true as const, value: source },
+  };
+  const javascript = analyzeJavaScriptStaticSource(source);
+  expect(javascript.electron.sender_validations).toHaveLength(1);
+  const analysis = analysisFor([{ file, javascript, semantic: null }]);
+  const context = contextFor(file, analysis);
+  addJavaScriptArtifactFiles(context);
+  addElectronIpcBoundaries(
+    context,
+    createElectronIpcContext(analysis, () => "app"),
+  );
+  const handlers = context.accumulator
+    .nodes()
+    .filter(({ kind }) => kind === "ipc-handler");
+  const validated = handlers.filter(({ observations }) =>
+    observations.some(
+      ({ properties }) =>
+        properties.fact_kind === "sender-validation-candidate",
+    ),
+  );
+  expect(validated).toHaveLength(1);
+  expect(
+    validated[0]?.observations.some(
+      ({ properties }) => properties.channel === "inner",
+    ),
+  ).toBe(true);
+});

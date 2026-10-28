@@ -1,3 +1,4 @@
+import type { SavedAnalysisSnapshotPartialObservation } from "./savedAnalysisSnapshot.js";
 import type { AnalysisSettingLimit } from "./analysisSettings.js";
 import type { JsonValue } from "./jsonValue.js";
 
@@ -296,8 +297,14 @@ import type { WebNetworkCapture } from "./webNetworkCapture.js";
 import type { FridaDeviceList, FridaProcessList } from "./fridaDiscovery.js";
 import type { CutterBridgeDiscovery } from "./cutterDiscovery.js";
 
+import type { WebTraceObservation } from "./webTraceObservation.js";
+import type { WebArtifactAcquisition } from "./webArtifactAcquisition.js";
+
 /** Provider-neutral evidence collected before a typed analysis failure. */
 export type AnalysisPartialObservation =
+  | SavedAnalysisSnapshotPartialObservation
+  | WebArtifactAcquisition
+  | WebTraceObservation
   | CutterBridgeDiscovery
   | FridaDeviceList
   | FridaProcessList

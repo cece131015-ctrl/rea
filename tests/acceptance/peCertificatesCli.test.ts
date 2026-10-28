@@ -117,3 +117,27 @@ cliTest(
     );
   },
 );
+
+cliTest(
+  "rejects a non-minimal PKCS#7 content OID through the public CLI",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-pe-cert-cli-oid-");
+    const path = join(root, "nonminimal.exe");
+    const payload = pkcs7SignedDataIndefiniteEnvelopeFixture();
+    expect([...payload.subarray(0, 5)]).toEqual([0x30, 0x80, 0x06, 0x09, 0x2a]);
+    const malformed = Buffer.concat([
+      payload.subarray(0, 3),
+      Buffer.from([0x0a, 0x80]),
+      payload.subarray(4),
+    ]);
+    await writeFile(path, peCertificateFixture(false, malformed));
+    const result = await cli.run({
+      arguments: ["inspect-pe-certificates", path, "--json"],
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.json).toMatchObject({
+      code: "invalid_request",
+      details: { operation: "inspect_pe_certificates" },
+    });
+  },
+);

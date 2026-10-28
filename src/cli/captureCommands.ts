@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { inspectPacketFieldsInputSchema } from "../domain/captures/packetFields.js";
 import { z } from "incur";
 import type { PacketCaptureService } from "../application/captures/PacketCaptureService.js";
@@ -62,7 +63,7 @@ export const registerCaptureCommands = (
             "tshark-capture",
             "inspect_packet_fields",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });
@@ -117,7 +118,7 @@ export const registerCaptureCommands = (
             "tshark-capture",
             "inspect_packet_capture",
             signal,
-          );
+          ).then(projectCliAnalysisResult);
         }),
       ),
   });

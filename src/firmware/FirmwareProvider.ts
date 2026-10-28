@@ -1,3 +1,4 @@
+import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { assertArtifactCommandPath } from "../process/ArtifactCommandPath.js";
 import { join } from "node:path";
 import type { FirmwareAnalysisPort } from "../application/firmware/FirmwareAnalysisPort.js";
@@ -327,6 +328,8 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
     request: FirmwareRequest,
     options?: ExecutionOptions,
   ): Promise<Outcome> {
+    // Capture configuration after queue admission; later operations may select updates.
+    const environment = snapshotEnvironment(this.environment);
     let root: PrivateRuntimeRoot | undefined;
     let rootLease: AnalysisCleanupLease | undefined;
     const engineName =
@@ -358,7 +361,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           );
         });
       const command = await resolveFirmwareCommand(
-        this.environment,
+        environment,
         engineName,
         request.operation,
         this.#files,
@@ -385,7 +388,7 @@ export class FirmwareProvider implements FirmwareAnalysisPort {
           limiter: command.limiter.invocationPath,
           args,
           cwd: root?.path ?? "",
-          environment: this.environment,
+          environment,
           signal,
           deadline,
           retainCleanup: (supervisor) => {

@@ -1,16 +1,12 @@
+import type { GodotPckAdmission } from "../GodotPckLocation.js";
+import type { PyInstallerAdmission } from "../pyinstaller/PyInstallerAdmission.js";
+import type { NodeSeaAdmission } from "../nodeSea/NodeSeaAdmission.js";
 import type { AsarHeaderAdmission } from "../../config/asarHeaderAdmission.js";
-import { AsarArtifactReader } from "../AsarArtifactReader.js";
 import type {
   ArtifactReader,
   ArtifactReaderTraversal,
 } from "../ArtifactReader.js";
-import { DirectoryArtifactReader } from "../DirectoryArtifactReader.js";
-import { GodotPckArtifactReader } from "../GodotPckArtifactReader.js";
-import { MachOSliceArtifactReader } from "../MachOSliceArtifactReader.js";
-import { NativeDmgArtifactReader } from "../NativeDmgArtifactReader.js";
-import { NodeSeaArtifactReader } from "../NodeSeaArtifactReader.js";
-import { PyInstallerArtifactReader } from "../PyInstallerArtifactReader.js";
-import { ZipArtifactReader } from "../ZipArtifactReader.js";
+import { createArtifactReader } from "../createArtifactReader.js";
 import type {
   ArtifactInventoryCoverage,
   ArtifactOccurrence,
@@ -20,42 +16,32 @@ import {
   ZIP_NON_ENTRY_LIMITATION,
 } from "../../domain/zipPackageFormat.js";
 import type { StableRegularFileDescriptor } from "../../filesystem/RegularFile.js";
+import { ESP_IMAGE_LIMITATIONS } from "../../domain/firmware/espImageFacts.js";
 
 export const createReader = (
   path: string,
   format: ArtifactOccurrence["artifact_format"],
   environment: Readonly<NodeJS.ProcessEnv>,
-  rootSource?: StableRegularFileDescriptor,
+  readerAdmission?:
+    | StableRegularFileDescriptor
+    | NodeSeaAdmission
+    | PyInstallerAdmission
+    | GodotPckAdmission,
   asarHeaderAdmission?: AsarHeaderAdmission,
+  selectedPath?: string,
 ): ArtifactReader | undefined => {
-  if (isZipPackageFormat(format))
-    return new ZipArtifactReader(path, format, undefined, rootSource);
-  switch (format) {
-    case "directory":
-      return new DirectoryArtifactReader(path, "omit");
-    case "asar":
-      return new AsarArtifactReader(
-        path,
-        asarHeaderAdmission === undefined
-          ? {}
-          : { headerAdmission: asarHeaderAdmission },
-      );
-    case "pyinstaller":
-      return new PyInstallerArtifactReader(path, rootSource);
-    case "node-sea":
-      return new NodeSeaArtifactReader(path, rootSource);
-    case "godot-pck":
-      return new GodotPckArtifactReader(path, rootSource);
-    case "mach-o-universal":
-      return process.platform === "darwin"
-        ? new MachOSliceArtifactReader(path, environment, undefined, rootSource)
-        : undefined;
-    case "dmg":
-      if (process.platform !== "darwin") return undefined;
-      return new NativeDmgArtifactReader(path, environment);
-    default:
-      return undefined;
-  }
+  if (
+    (format === "mach-o-universal" || format === "dmg") &&
+    process.platform !== "darwin"
+  )
+    return undefined;
+  return createArtifactReader(path, format, {
+    environment,
+    unreadableDirectories: "omit",
+    admission: readerAdmission,
+    asarHeaderAdmission,
+    selectedPath,
+  });
 };
 
 /** Decide traversal scope and availability once, independently of diagnostic wording. */
@@ -79,9 +65,27 @@ export const inventoryCoverage = (
               "PCK inventory establishes packaged bytes and metadata; scenes, binary resources, GDScript bytecode and runtime signal behavior were not decoded.",
             ]
           : []),
+        ...(reader.format === "unityfs"
+          ? [
+              "UnityFS inventory establishes packaged bytes and metadata; serialized objects, textures, meshes and runtime asset behavior were not decoded. LZMA-compressed members are unsupported.",
+            ]
+          : []),
         ...(reader.format === "node-sea"
           ? [
               "Node SEA inventory establishes the injected blob, flags, fuse sentinel, main script, optional code cache, snapshot, and assets. V8 snapshots and code cache are not deserialized, and the application is not executed.",
+            ]
+          : []),
+        ...(reader.format === "intel-hex" || reader.format === "srec"
+          ? [
+              "Intel HEX/S-record inventory decodes data records into address-contiguous regions. It does not establish CPU, byte order, memory map, or that a declared start address is executable; gaps are unwritten, not zero.",
+            ]
+          : []),
+        ...(reader.format === "esp-image"
+          ? [ESP_IMAGE_LIMITATIONS.inventoryScope]
+          : []),
+        ...(reader.format === "uimage"
+          ? [
+              "uImage inventory establishes the 64-byte legacy header facts and stored payload bytes. Compressed payloads are not decompressed, and the image is not executed.",
             ]
           : []),
         ...traversal.limitations,
@@ -107,7 +111,12 @@ export const inventoryCoverage = (
     format === "directory" ||
     format === "asar" ||
     format === "godot-pck" ||
-    format === "node-sea"
+    format === "unityfs" ||
+    format === "uimage" ||
+    format === "node-sea" ||
+    format === "intel-hex" ||
+    format === "srec" ||
+    format === "esp-image"
   )
     return {
       coverage: { scope: "container-entries", status: "unknown" },
